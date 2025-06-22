@@ -106,6 +106,59 @@ def combined_loss(L, A, x, w=1):
     
     return w * loss1 + loss2
 
+def improved_sketch_loss(
+    L,
+    A,
+    num_sketches: int = 2,
+    normalized: bool = False,
+    c: torch.Tensor | None = None,
+    use_rademacher: bool = False
+):
+    """
+    Improved sketch-based loss:
+      - Averages over `num_sketches` independent sketch vectors
+      - Optionally normalizes each residual by ||A z|| or a provided constant
+    Args:
+        L: factor (L) or tuple (L, U)
+        A: target matrix (sparse or dense)
+        num_sketches: number of sketches to average
+        normalized: whether to normalize by ||A z|| or given c
+        c: optional normalization constant
+        use_rademacher: sample sketches from ±1 instead of Gaussian
+
+    Returns:
+        Average sketch loss = mean(||(L U - A) z||₂ / denom)
+    """
+    # Unpack factors
+    if isinstance(L, tuple):
+        L_mat, U_mat = L
+    else:
+        L_mat = L
+        U_mat = L_mat.T
+
+    n = A.shape[0]
+    losses = []
+    for _ in range(num_sketches):
+        if use_rademacher:
+            z = torch.randint(0, 2, (n, 1), device=L_mat.device, dtype=L_mat.dtype) * 2 - 1
+        else:
+            z = torch.randn((n, 1), device=L_mat.device, dtype=L_mat.dtype)
+
+        # residual (LU - A) z
+        r = L_mat @ (U_mat @ z) - A @ z
+        norm_r = torch.linalg.vector_norm(r, ord=2)
+
+        if normalized:
+            if c is not None:
+                denom = c + 1e-8
+            else:
+                denom = torch.linalg.vector_norm(A @ z, ord=2)
+            norm_r = norm_r / denom
+
+        losses.append(norm_r)
+
+    return torch.stack(losses).mean()
+
 
 def loss(output, data, config=None, **kwargs):
     
