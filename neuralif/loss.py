@@ -98,11 +98,6 @@ def dircet_min_loss(L, A, x):
     res = L@(U@x)
     return torch.linalg.vector_norm(res, ord=2)
 
-
-import torch
-from apps.data import graph_to_matrix
-
-
 def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3):
     """
     Perform `cg_steps` of Preconditioned CG on a random RHS, and return
