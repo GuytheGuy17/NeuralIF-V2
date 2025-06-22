@@ -99,65 +99,105 @@ def dircet_min_loss(L, A, x):
     return torch.linalg.vector_norm(res, ord=2)
 
 
-def combined_loss(L, A, x, w=1):
-    # combined loss
-    loss1 = sketched_loss(L, A)
-    loss2 = supervised_loss(L, A, x)
-    
-    return w * loss1 + loss2
+import torch
+from apps.data import graph_to_matrix
 
-def improved_sketch_loss(
+
+def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3):
+    """
+    Perform `cg_steps` of Preconditioned CG on a random RHS, and return
+    the mean relative residual over those steps:
+        mean_i ||r_i|| / ||r_0||
+    """
+    n = A.shape[0]
+    # random right-hand side b and initial guess x0=0
+    b = torch.randn((n,1), device=A.device, dtype=A.dtype)
+    x = torch.zeros_like(b)
+    # initial residual
+    r = b.clone()
+    r0_norm = torch.linalg.vector_norm(r, 2) + 1e-16
+    # precondition initial residual: z0 = M^{-1} r0
+    z, _ = torch.linalg.solve_triangular(L_mat, r, lower=True)
+    z, _ = torch.linalg.solve_triangular(U_mat, z, lower=False)
+    p = z.clone()
+
+    residuals = []
+    for _ in range(cg_steps):
+        Ap = A @ p
+        alpha = (r * z).sum() / (p * Ap).sum()
+        x = x + alpha * p
+        r = r - alpha * Ap
+        # record relative residual
+        residuals.append(torch.linalg.vector_norm(r, 2) / r0_norm)
+        # precondition
+        z, _ = torch.linalg.solve_triangular(L_mat, r, lower=True)
+        z, _ = torch.linalg.solve_triangular(U_mat, z, lower=False)
+        beta = (r * z).sum() / ((p * Ap).sum() * alpha + 1e-16)
+        p = z + beta * p
+
+    # return average relative residual
+    return torch.stack(residuals).mean()
+
+
+def improved_sketch_with_pcg(
     L,
     A,
     num_sketches: int = 2,
     normalized: bool = False,
-    c: torch.Tensor | None = None,
+    pcg_steps: int = 3,
+    pcg_weight: float = 0.1,
     use_rademacher: bool = False
 ):
     """
-    Improved sketch-based loss:
-      - Averages over `num_sketches` independent sketch vectors
-      - Optionally normalizes each residual by ||A z|| or a provided constant
-    Args:
-        L: factor (L) or tuple (L, U)
-        A: target matrix (sparse or dense)
-        num_sketches: number of sketches to average
-        normalized: whether to normalize by ||A z|| or given c
-        c: optional normalization constant
-        use_rademacher: sample sketches from ±1 instead of Gaussian
-
-    Returns:
-        Average sketch loss = mean(||(L U - A) z||₂ / denom)
+    Sketch-based loss augmented with a CG proxy averaged over its first iterations:
+      - Averages sketch residuals over `num_sketches` sketches
+      - Optionally normalizes each sketch residual
+      - Adds the mean CG relative-residual over `pcg_steps`, weighted by `pcg_weight`
     """
-    # Unpack factors
+    # unpack factors
     if isinstance(L, tuple):
         L_mat, U_mat = L
     else:
         L_mat = L
         U_mat = L_mat.T
 
+    # sketch term
     n = A.shape[0]
     losses = []
     for _ in range(num_sketches):
         if use_rademacher:
-            z = torch.randint(0, 2, (n, 1), device=L_mat.device, dtype=L_mat.dtype) * 2 - 1
+            z = torch.randint(0,2,(n,1),device=L_mat.device,dtype=L_mat.dtype)*2 - 1
         else:
-            z = torch.randn((n, 1), device=L_mat.device, dtype=L_mat.dtype)
-
-        # residual (LU - A) z
+            z = torch.randn((n,1),device=L_mat.device,dtype=L_mat.dtype)
         r = L_mat @ (U_mat @ z) - A @ z
-        norm_r = torch.linalg.vector_norm(r, ord=2)
-
+        norm_r = torch.linalg.vector_norm(r,2)
         if normalized:
-            if c is not None:
-                denom = c + 1e-8
-            else:
-                denom = torch.linalg.vector_norm(A @ z, ord=2)
+            denom = torch.linalg.vector_norm(A @ z,2) + 1e-16
             norm_r = norm_r / denom
-
         losses.append(norm_r)
+    sketch_loss = torch.stack(losses).mean()
 
-    return torch.stack(losses).mean()
+    # pcg proxy (average over early residuals)
+    proxy = pcg_proxy(L_mat, U_mat, A, pcg_steps)
+
+    return sketch_loss + pcg_weight * proxy
+
+
+def loss(output, data, config=None, **kwargs):
+    # load matrix A
+    with torch.no_grad():
+        A, _ = graph_to_matrix(data)
+    if config == 'sketch_pcg':
+        return improved_sketch_with_pcg(
+            output,
+            A,
+            num_sketches=kwargs.get('num_sketches',2),
+            normalized=kwargs.get('normalized',False),
+            pcg_steps=kwargs.get('pcg_steps',3),
+            pcg_weight=kwargs.get('pcg_weight',0.1),
+            use_rademacher=kwargs.get('use_rademacher',False)
+        )
+    return original_loss(output, data, config, **kwargs)
 
 
 def loss(output, data, config=None, **kwargs):
