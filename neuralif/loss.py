@@ -179,23 +179,6 @@ def improved_sketch_with_pcg(
 
 
 def loss(output, data, config=None, **kwargs):
-    # load matrix A
-    with torch.no_grad():
-        A, _ = graph_to_matrix(data)
-    if config == 'sketch_pcg':
-        return improved_sketch_with_pcg(
-            output,
-            A,
-            num_sketches=kwargs.get('num_sketches',2),
-            normalized=kwargs.get('normalized',False),
-            pcg_steps=kwargs.get('pcg_steps',3),
-            pcg_weight=kwargs.get('pcg_weight',0.1),
-            use_rademacher=kwargs.get('use_rademacher',False)
-        )
-    return original_loss(output, data, config, **kwargs)
-
-
-def loss(output, data, config=None, **kwargs):
     
     # load the data
     with torch.no_grad():
@@ -223,6 +206,16 @@ def loss(output, data, config=None, **kwargs):
     
     elif config == "frobenius":
         l = frobenius_loss(output, A, sparse=False)
+    elif config == 'sketch_pcg':
+        l == improved_sketch_with_pcg(
+            output,
+            A,
+            num_sketches=kwargs.get('num_sketches',2),
+            normalized=kwargs.get('normalized',False),
+            pcg_steps=kwargs.get('pcg_steps',3),
+            pcg_weight=kwargs.get('pcg_weight',0.1),
+            use_rademacher=kwargs.get('use_rademacher',False)
+        )
     
     else:
         raise ValueError("Invalid loss configuration")
