@@ -8,10 +8,8 @@ from torch_geometric.nn import aggr
 from torch_geometric.utils import to_scipy_sparse_matrix
 from scipy.sparse import tril
 from scipy.sparse.csgraph import nested_dissection
-from apps.data import graph_to_matrix, augment_features, TwoHop, ToLowerTriangular
+from apps.data import graph_to_matrix, augment_features
 import aggr
-
-
 from neuralif.utils import TwoHop, gershgorin_norm
 
 
@@ -521,7 +519,7 @@ class NeuralIFWithND(NeuralIF):
     """
     def forward(self, data):
         # 1) Compute ND permutation
-        data = copy.copy(data)
+        new_data = data.clone() # Ensure we don't modify the original data
         with torch.no_grad():
             # construct SciPy CSR for ordering
             n = data.x.size(0)
