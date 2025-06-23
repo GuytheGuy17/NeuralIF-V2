@@ -6,6 +6,10 @@ import torch_geometric.nn as pyg
 from torch_geometric.nn import aggr
 from torch_geometric.utils import to_scipy_sparse_matrix
 from scipy.sparse import tril
+from scipy.sparse.csgraph import nested_dissection
+from apps.data import graph_to_matrix, augment_features, TwoHop, ToLowerTriangular
+import aggr
+
 
 from neuralif.utils import TwoHop, gershgorin_norm
 
@@ -503,6 +507,57 @@ class NeuralIF(nn.Module):
             l1_penalty = torch.sum(torch.abs(edge_values)) / len(edge_values)
             
             return t, l1_penalty, node_output
+
+class NeuralIFWithND(NeuralIF):
+    """
+    Extends NeuralIF with a one-shot Nested-Dissection permutation baked into the forward pass.
+
+    Steps in forward:
+      1) Build SciPy CSR from the input graph and compute ND permutation p
+      2) Permute the Data object (nodes and edges) by p
+      3) Call base NeuralIF.forward on the permuted graph
+      4) Invert p on the returned factor(s) and node outputs
+    """
+    def forward(self, data):
+        # 1) Compute ND permutation
+        with torch.no_grad():
+            # construct SciPy CSR for ordering
+            n = data.x.size(0)
+            A_csr = to_scipy_sparse_matrix(data.edge_index, data.edge_attr, size=(n, n))
+            perm_np = nested_dissection(A_csr, symmetric_mode=True)
+            p = torch.as_tensor(perm_np, dtype=torch.long, device=data.x.device)
+            invp = torch.empty_like(p)
+            invp[p] = torch.arange(p.numel(), device=p.device)
+
+        # 2) Permute Data in place (fresh clone assumed upstream)
+        data.x = data.x[p]
+        if hasattr(data, 'batch'):
+            data.batch = data.batch[p]
+        row, col = data.edge_index
+        data.edge_index = torch.stack([p[row], p[col]], dim=0)
+        # edge_attr aligns automatically
+
+        # 3) Run original NeuralIF on the reordered graph
+        out1, out2, node_out = super().forward(data)
+
+        # 4) Invert permutation on outputs
+        def invert_tensor(M):
+            if isinstance(M, torch.Tensor) and M.is_sparse:
+                idx, vals = M._indices(), M._values()
+                i, j = idx[0], idx[1]
+                new_idx = torch.stack([invp[i], invp[j]], dim=0)
+                return torch.sparse_coo_tensor(new_idx, vals, M.shape, device=M.device)
+            elif isinstance(M, torch.Tensor):
+                return M[invp][:, invp]
+            else:
+                return M  # e.g., a scalar or None
+
+        L = invert_tensor(out1)
+        # out2 is either U (sparse) or a scalar/reg term
+        U_or_reg = invert_tensor(out2) if (isinstance(out2, torch.Tensor) and out2.is_sparse) else out2
+        node_out = node_out[invp] if isinstance(node_out, torch.Tensor) else node_out
+
+        return L, U_or_reg, node_out
 
 
 class LearnedLU(nn.Module):
