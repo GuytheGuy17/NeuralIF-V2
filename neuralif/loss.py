@@ -142,7 +142,7 @@ def improved_sketch_with_pcg(
     pcg_steps: int = 3,
     pcg_weight: float = 0.1,
     use_rademacher: bool = False
-):
+    ):
     """
     Sketch-based loss augmented with a CG proxy averaged over its first iterations:
       - Averages sketch residuals over `num_sketches` sketches

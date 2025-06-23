@@ -156,7 +156,17 @@ def main(config):
             data = data.to(device)
             
             output, reg, _ = model(data)
-            l = loss(output, data, c=reg, config=config["loss"])
+            l = loss(
+                output,
+                data,
+                config=config["loss"],
+                c=config.get("c", reg),           # pass through the reg if your loss needs it
+                num_sketches=config["num_sketches"],
+                pcg_steps=config["pcg_steps"],
+                pcg_weight=config["pcg_weight"],
+                normalized=config["normalized"],
+                use_rademacher=config["use_rademacher"],
+                )
             
             #  if reg:
             #    l = l + config["regularizer"] * reg
@@ -240,6 +250,17 @@ def argparser():
     parser.add_argument("--dataset", type=str, default="random")
     parser.add_argument("--loss", type=str, required=False)
     parser.add_argument("--gradient_clipping", type=float, default=1.0)
+
+    parser.add_argument("--num_sketches", type=int, default=2,
+                    help="number of sketch vectors in sketch_pcg loss")
+    parser.add_argument("--pcg_steps", type=int, default=3,
+                    help="how many CG iterations to unroll in the proxy")
+    parser.add_argument("--pcg_weight", type=float, default=0.1,
+                    help="weight of the CG-proxy term in the loss")
+    parser.add_argument("--normalized", action="store_true",
+                    help="normalize each sketch by ||A z||")
+    parser.add_argument("--use_rademacher", action="store_true",
+                    help="draw +/-1 sketches instead of Gaussian")
     
     parser.add_argument("--regularizer", type=float, default=0)
     parser.add_argument("--scheduler", action='store_true', default=False)
