@@ -1,4 +1,5 @@
 import numml.sparse as sp
+import copy
 import torch
 import torch.nn as nn
 import torch_geometric
@@ -520,6 +521,7 @@ class NeuralIFWithND(NeuralIF):
     """
     def forward(self, data):
         # 1) Compute ND permutation
+        data = copy.copy(data)
         with torch.no_grad():
             # construct SciPy CSR for ordering
             n = data.x.size(0)

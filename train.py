@@ -169,7 +169,7 @@ def main(config):
                 )
             
             #  if reg:
-            #    l = l + config["regularizer"] * reg
+            #  l = l + config["regularizer"] * reg
             
             l.backward()
             running_loss += l.item()
