@@ -4,16 +4,8 @@ import torch
 import numpy as np
 import scipy
 from scipy.sparse import coo_matrix, lil_matrix
-
-# ====================================================================
-# FINAL STEP: Import the conversion function from your data.py file
-# ====================================================================
 from data import matrix_to_graph
 
-
-# ====================================================================
-#  GENERATOR 1: ENHANCED FEM-LIKE MATRICES (Recommended)
-# ====================================================================
 def generate_fem_like_matrix(grid_dims=(32, 32), varying_conductivity=False):
     """
     Generates a 2D FEM-like sparse matrix.
@@ -62,9 +54,6 @@ def generate_fem_like_matrix(grid_dims=(32, 32), varying_conductivity=False):
     matrix = matrix + identity_shift
     return matrix.tocoo()
 
-# ====================================================================
-#  GENERATOR 2: ORIGINAL RANDOM SPD MATRICES
-# ====================================================================
 def generate_sparse_random(n, alpha=1e-4, random_state=0):
     """Generates a random sparse SPD matrix (your original method)."""
     rng = np.random.RandomState(random_state)
