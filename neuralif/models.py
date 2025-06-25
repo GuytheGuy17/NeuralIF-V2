@@ -534,7 +534,7 @@ class NeuralIFWithND(NeuralIF):
         if hasattr(data, 'batch'):
             data.batch = data.batch[p]
         row, col = data.edge_index
-        data.edge_index = torch.stack([p[row], p[col]], dim=0)
+        data.edge_index = invp[data.edge_index]
         # edge_attr aligns automatically
 
         # 3) Run original NeuralIF on the reordered graph

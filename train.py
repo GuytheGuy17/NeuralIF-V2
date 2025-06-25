@@ -38,7 +38,10 @@ def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
             # run CG on CPU
             with torch.inference_mode():
                 preconditioner = LearnedPreconditioner(data, model)
-            
+                # Move the model to CPU for the solver-based validation
+            model.to("cpu") 
+            preconditioner = LearnedPreconditioner(data.to("cpu"), model) # Ensure data is also on CPU
+
             A = A.to("cpu").to(torch.float64)
             b = b.to("cpu").to(torch.float64)
             x_init = None
@@ -277,7 +280,7 @@ def argparser():
     parser.add_argument("--activation", type=str, default="relu")
     
     # NIF parameters
-    parser.add_argument("--skip_connections", action='store_true', default=True)
+    parser.add_argument('--no-skip-connections', dest='skip_connections', action='store_false')
     parser.add_argument("--augment_nodes", action='store_true')
     parser.add_argument("--global_features", type=int, default=0)
     parser.add_argument("--edge_features", type=int, default=1)
