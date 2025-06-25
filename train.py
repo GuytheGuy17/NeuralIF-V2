@@ -238,7 +238,6 @@ def argparser():
     
     # Training parameters
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--n", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_epochs", type=int, default=100)
     parser.add_argument("--dataset", type=str, default="random")

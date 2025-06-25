@@ -144,6 +144,3 @@ if __name__ == '__main__':
         args.matrix_size = args.grid_size * args.grid_size
 
     main(args)
-
-# The old, hardcoded block has been removed.
-# This script is now a clean, configurable command-line tool.
