@@ -17,71 +17,61 @@ from krylov.cg import preconditioned_conjugate_gradient
 from krylov.gmres import gmres
 from krylov.preconditioner import LearnedPreconditioner
 
-
 @torch.no_grad()
 def validate(model, validation_loader, solve=False, solver="cg", **kwargs):
     model.eval()
-                
+            
     acc_loss = 0.0
     num_loss = 0
     acc_solver_iters = 0.0
+    # Ensure the model is on the correct device
+    # This is important for the solver-based validation
+    global device 
     
     for i, data in enumerate(validation_loader):
         data = data.to(device)
         
-        # construct problem data
         A, b = graph_to_matrix(data)
         
-        # run conjugate gradient method
-        # this requires the learned preconditioner to be reasonably good!
         if solve:
-            # run CG on CPU
-            with torch.inference_mode():
-                preconditioner = LearnedPreconditioner(data, model)
+            
+            original_device = next(model.parameters()).device
+            try:
                 # Move the model to CPU for the solver-based validation
-            model.to("cpu") 
-            preconditioner = LearnedPreconditioner(data.to("cpu"), model) # Ensure data is also on CPU
+                model.to("cpu")
+                
+                with torch.inference_mode():
+                    preconditioner = LearnedPreconditioner(data.to("cpu"), model)
+                
+                A = A.to("cpu").to(torch.float64)
+                b = b.to("cpu").to(torch.float64)
+                
+                if solver == "cg":
+                    l, x_hat = preconditioned_conjugate_gradient(A, b, M=preconditioner, x0=None, rtol=1e-6, max_iter=1000)
+                elif solver == "gmres":
+                    l, x_hat = gmres(A, b, M=preconditioner, x0=None, atol=1e-6, max_iter=1000, left=False)
+                else:
+                    raise NotImplementedError("Solver not implemented choose between CG and GMRES!")
+                
+                acc_solver_iters += len(l) - 1
 
-            A = A.to("cpu").to(torch.float64)
-            b = b.to("cpu").to(torch.float64)
-            x_init = None
-            
-            solver_start = time.time()
-            
-            if solver == "cg":
-                l, x_hat = preconditioned_conjugate_gradient(A.to("cpu"), b.to("cpu"), M=preconditioner,
-                                                             x0=x_init, rtol=1e-6, max_iter=1_000)
-            elif solver == "gmres":
-                l, x_hat = gmres(A, b, M=preconditioner, x0=x_init, atol=1e-6, max_iter=1_000, left=False)
-            else:
-                raise NotImplementedError("Solver not implemented choose between CG and GMRES!")
-            
-            solver_stop = time.time()
-            
-            # Measure preconditioning performance
-            solver_time = (solver_stop - solver_start)
-            acc_solver_iters += len(l) - 1
+            finally:
+                # This GUARANTEES the model is moved back to its original device (e.g., the GPU)
+                model.to(original_device)
         
         else:
+            # This part for loss-based validation remains the same
             output, _, _ = model(data)
-            
-            # Here, we compute the loss using the full forbenius norm (no estimator)
-            # l = frobenius_loss(output, A)
-            
             l = loss(data, output, config="frobenius")
-            
             acc_loss += l.item()
             num_loss += 1
-    
+            
     if solve:
-        # print(f"Smallest eigenvalue: {dist[0]}")
         print(f"Validation\t iterations:\t{acc_solver_iters / len(validation_loader):.2f}")
         return acc_solver_iters / len(validation_loader)
-        
     else:
         print(f"Validation loss:\t{acc_loss / num_loss:.2f}")
         return acc_loss / len(validation_loader)
-
 
 def main(config):
     if config["save"]:
@@ -126,12 +116,13 @@ def main(config):
     optimizer = torch.optim.AdamW(model.parameters())
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=20)
     
-    # Setup datasets
-    train_loader = get_dataloader(config["dataset"], config["n"], config["batch_size"],
-                                  spd=not gmres, mode="train")
-    
-    validation_loader = get_dataloader(config["dataset"], config["n"], 1, spd=(not gmres), mode="val")
-    
+    train_loader = get_dataloader(dataset_name=config["dataset"], 
+                                  batch_size=config["batch_size"], 
+                                  mode="train")
+
+    validation_loader = get_dataloader(dataset_name=config["dataset"],
+                                       batch_size=1, # Always use batch size 1 for validation
+                                       mode="val")
     best_val = float("inf")
     logger = TrainResults(folder)
     
