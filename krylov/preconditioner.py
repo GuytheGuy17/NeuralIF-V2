@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import numml as nm
+from torch_geometric.utils import from_scipy_sparse_matrix
 
 import ilupp
 
@@ -96,9 +97,9 @@ class ICholPreconditioner(Preconditioner):
         # icholprec = icholprec.astype(np.float32)
         self.check_breakdown(icholprec)
         
-        # convert to nummel sparse format
-        self.L = nm.sparse.SparseCSRTensor(icholprec)
-        self.U = nm.sparse.SparseCSRTensor(icholprec.T)
+        # convert to PyTorch sparse format
+        self.L, _ = from_scipy_sparse_matrix(icholprec)
+        self.U, _ = from_scipy_sparse_matrix(icholprec.T)
     
     def get_p_matrix(self):
         return self.L@self.U
@@ -133,10 +134,10 @@ class ILUPreconditioner(Preconditioner):
         # check breakdowns
         self.check_breakdown(L)
         self.check_breakdown(U)
-        
-        # convert to nummel sparse format
-        self.L = nm.sparse.SparseCSRTensor(L)
-        self.U = nm.sparse.SparseCSRTensor(U)
+    
+        # convert to PyTorch sparse format
+        self.L, _ = from_scipy_sparse_matrix(L)
+        self.U, _ = from_scipy_sparse_matrix(U)
 
     def __call__(self, x):
         return fb_solve(self.L, self.U, x)
@@ -176,8 +177,19 @@ class LearnedPreconditioner(Preconditioner):
 
 
 def fb_solve(L, U, r, unit_lower=False, unit_upper=False):
-    y = L.solve_triangular(upper=False, unit=unit_lower, b=r)
-    z = U.solve_triangular(upper=True, unit=unit_upper, b=y)
+    # This function now uses PyTorch's native sparse triangular solver
+    # It assumes L, U, and r are PyTorch tensors on the same device (e.g., GPU)
+    
+    # Note: PyTorch's native solver does not support unit diagonals directly.
+    # This is usually not a problem for IC, but for ILU where U has unit diagonals,
+    # the factor U should be constructed with ones on the diagonal.
+    
+    # First solve: L * y = r (forward substitution)
+    y = torch.sparse.linalg.solve_triangular(L, r, upper=False)
+
+    # Second solve: U * z = y (backward substitution)
+    z = torch.sparse.linalg.solve_triangular(U, y, upper=True)
+
     return z
 
 
