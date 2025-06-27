@@ -502,37 +502,33 @@ class NeuralIF(nn.Module):
             
             return t, l1_penalty, node_output
 
-class NeuralIFWithND(NeuralIF):
+class NeuralIFWithRCM(NeuralIF):
     """
-    Extends NeuralIF with a one-shot Nested-Dissection permutation baked into the forward pass.
-
-    Steps in forward:
-      1) Build SciPy CSR from the input graph and compute ND permutation p
-      2) Permute the Data object (nodes and edges) by p
-      3) Call base NeuralIF.forward on the permuted graph
-      4) Invert p on the returned factor(s) and node outputs
+    Extends NeuralIF with a one-shot Reverse Cuthill-McKee permutation
+    baked into the forward pass.
     """
     def forward(self, data):
-        # 1) Compute ND permutation
-        new_data = data.clone() # Ensure we don't modify the original data
+        # 1) Compute RCM permutation
         with torch.no_grad():
-            # construct SciPy CSR for ordering
             n = data.x.size(0)
-            A_csr = to_scipy_sparse_matrix(data.edge_index, data.edge_attr, size=(n, n))
-            perm_np = nested_dissection(A_csr, symmetric_mode=True)
+            # Convert to a SciPy CSR matrix to compute the reordering
+            A_csr = to_scipy_sparse_matrix(data.edge_index, data.edge_attr, (n, n)).tocsr()
+
+            # Use Reverse Cuthill-McKee to get the permutation array
+            perm_np = reverse_cuthill_mckee(A_csr)
+
             p = torch.as_tensor(perm_np, dtype=torch.long, device=data.x.device)
             invp = torch.empty_like(p)
             invp[p] = torch.arange(p.numel(), device=p.device)
 
-        # 2) Permute Data in place (fresh clone assumed upstream)
+        # 2) Permute the graph data object using the new ordering 'p'
         data.x = data.x[p]
         if hasattr(data, 'batch'):
             data.batch = data.batch[p]
-        row, col = data.edge_index
         data.edge_index = invp[data.edge_index]
-        # edge_attr aligns automatically
+        # edge_attr aligns automatically with the permuted edge_index
 
-        # 3) Run original NeuralIF on the reordered graph
+        # 3) Call the base NeuralIF.forward on the reordered graph
         out1, out2, node_out = super().forward(data)
 
         # 4) Invert permutation on outputs
