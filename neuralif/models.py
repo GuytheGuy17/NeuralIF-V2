@@ -1,4 +1,3 @@
-import numml.sparse as sp
 import copy
 import torch
 import torch.nn as nn
@@ -225,20 +224,19 @@ class NeuralPCG(nn.Module):
         # the diag element gets duplicated later so we need to divide by 2
         edge_values[diag_idx] = 0.5 * torch.sqrt(diag_vals)
         size = node_x.size()[0]
-        
+        # In class NeuralPCG, method transform_output_matrix
         if torch.is_inference_mode_enabled():
-            
-            # use scipy to symmetrize output
-            m = to_scipy_sparse_matrix(edge_index, edge_values)
-            m = m + m.T
-            m = tril(m)
-            
-            # efficient sparse numml format
-            l = sp.SparseCSRTensor(m)
-            u = sp.SparseCSRTensor(m.T)
-            
-            return l, u, None
+        # Symmetrize and get lower triangular part just like in the training 'else' block
+            transpose_index = torch.stack([edge_index[1], edge_index[0]], dim=0)
+            sym_value = torch.cat([edge_values, edge_values]).squeeze()
+            sym_index = torch.cat([edge_index, transpose_index], dim=1)
         
+            mask = sym_index[0] <= sym_index[1]
+            t = torch.sparse_coo_tensor(sym_index[:, mask], sym_value[mask], size=(size, size))
+            t = t.coalesce()
+
+        # Return the PyTorch sparse tensor and its transpose
+            return t, t.T, None
         else:
             # symmetrize the output by stacking things!
             transpose_index = torch.stack([edge_index[1], edge_index[0]], dim=0)
@@ -488,11 +486,8 @@ class NeuralIF(nn.Module):
                                         size=(node_x.size()[0], node_x.size()[0]))
                                         # type=torch.double)
             
-            # produce L and U seperatly
-            l = sp.SparseCSRTensor(m)
-            u = sp.SparseCSRTensor(m.T)
             
-            return l, u, node_output
+            return m, m.T, node_output
         
         else:
             # For training and testing (computing regular losses for examples.)
@@ -688,11 +683,9 @@ class LearnedLU(nn.Module):
         upper_matrix = torch.sparse_coo_tensor(upper_indices, upper_values.squeeze(), size=(n, n))
         
         if torch.is_inference_mode_enabled():
-            # convert to numml format
-            l = sp.SparseCSRTensor(lower_matrix)
-            u = sp.SparseCSRTensor(upper_matrix)
-            
-            return l, u, None
+            # In inference mode, we return the matrices directly
+            # and do not compute the L1 norm
+            return lower_matrix, upper_matrix, None
         
         else:
             # min diag element as a regularization term
