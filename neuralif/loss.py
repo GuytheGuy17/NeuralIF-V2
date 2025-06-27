@@ -207,7 +207,7 @@ def loss(output, data, config=None, **kwargs):
     elif config == "frobenius":
         l = frobenius_loss(output, A, sparse=False)
     elif config == 'sketch_pcg':
-        l == improved_sketch_with_pcg(
+        l = improved_sketch_with_pcg(
             output,
             A,
             num_sketches=kwargs.get('num_sketches',2),
