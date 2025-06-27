@@ -7,13 +7,65 @@ from torch_geometric.nn import aggr
 from torch_geometric.utils import to_scipy_sparse_matrix
 from scipy.sparse import tril
 from apps.data import graph_to_matrix, augment_features
-import aggr
 from neuralif.utils import TwoHop, gershgorin_norm
+from scipy.sparse.csgraph import reverse_cuthill_mckee
 
 
 ############################
 #          Layers          #
 ############################
+class MLP(nn.Module):
+    def __init__(self, width, layer_norm=False, activation="relu", activate_final=False):
+        super().__init__()
+        width = list(filter(lambda x: x > 0, width))
+        assert len(width) >= 2, "Need at least one layer in the network!"
+
+        lls = nn.ModuleList()
+        for k in range(len(width)-1):
+            lls.append(nn.Linear(width[k], width[k+1], bias=True))
+            if k != (len(width)-2) or activate_final:
+                if activation == "relu":
+                    lls.append(nn.ReLU())
+                elif activation == "tanh":
+                    lls.append(nn.Tanh())
+                elif activation == "leakyrelu":
+                    lls.append(nn.LeakyReLU())
+                elif activation == "sigmoid":
+                    lls.append(nn.Sigmoid())
+                else:
+                    raise NotImplementedError(f"Activation '{activation}' not implemented")
+
+        if layer_norm:
+            lls.append(nn.LayerNorm(width[-1]))
+        
+        self.m = nn.Sequential(*lls)
+
+    def forward(self, x):
+        return self.m(x)
+
+
+class ToLowerTriangular(torch_geometric.transforms.BaseTransform):
+    def __init__(self, inplace=False):
+        self.inplace = inplace
+        
+    def __call__(self, data, order=None):
+        if not self.inplace:
+            data = data.clone()
+        
+        # TODO: if order is given use that one instead
+        if order is not None:
+            raise NotImplementedError("Custom ordering not yet implemented...")
+        
+        # transform the data into lower triag graph
+        # this should be a data transformation (maybe?)
+        rows, cols = data.edge_index[0], data.edge_index[1]
+        fil = cols <= rows
+        l_index = data.edge_index[:, fil]
+        edge_embedding = data.edge_attr[fil]
+        
+        data.edge_index, data.edge_attr = l_index, edge_embedding
+        return data
+
 class GraphNet(nn.Module):
     # Follows roughly the outline of torch_geometric.nn.MessagePassing()
     # As shown in https://github.com/deepmind/graph_nets
@@ -97,36 +149,6 @@ class GraphNet(nn.Module):
             # update node features
             node_embeddings = self.node_block(agg_features)
             return edge_embedding, node_embeddings, None
-
-
-class MLP(nn.Module):
-    def __init__(self, width, layer_norm=False, activation="relu", activate_final=False):
-        super().__init__()
-        width = list(filter(lambda x: x > 0, width))
-        assert len(width) >= 2, "Need at least one layer in the network!"
-
-        lls = nn.ModuleList()
-        for k in range(len(width)-1):
-            lls.append(nn.Linear(width[k], width[k+1], bias=True))
-            if k != (len(width)-2) or activate_final:
-                if activation == "relu":
-                    lls.append(nn.ReLU())
-                elif activation == "tanh":
-                    lls.append(nn.Tanh())
-                elif activation == "leakyrelu":
-                    lls.append(nn.LeakyReLU())
-                elif activation == "sigmoid":
-                    lls.append(nn.Sigmoid())
-                else:
-                    raise NotImplementedError(f"Activation '{activation}' not implemented")
-
-        if layer_norm:
-            lls.append(nn.LayerNorm(width[-1]))
-        
-        self.m = nn.Sequential(*lls)
-
-    def forward(self, x):
-        return self.m(x)
 
 
 class MP_Block(nn.Module):
@@ -311,17 +333,19 @@ class PreCondNet(nn.Module):
         size = node_x.size()[0]
         
         if torch.is_inference_mode_enabled():
-            # use scipy to symmetrize output
-            m = to_scipy_sparse_matrix(edge_index, edge_values)
-            m = m + m.T
-            m = tril(m)
-            
-            # efficient sparse numml format
-            l = sp.SparseCSRTensor(m)
-            u = sp.SparseCSRTensor(m.T)
-            
-            # Return upper and lower matrix l and u
-            return l, u, None
+        # Symmetrize and get lower triangular part just like in the training 'else' block
+            transpose_index = torch.stack([edge_index[1], edge_index[0]], dim=0)
+            sym_value = torch.cat([edge_values, edge_values])
+            sym_index = torch.cat([edge_index, transpose_index], dim=1)
+
+            m_mask = sym_index[0] <= sym_index[1]
+        
+            t = torch.sparse_coo_tensor(sym_index[:, m_mask], sym_value[m_mask], 
+                                    size=(size, size))
+            t = t.coalesce()
+        
+        # Return the PyTorch sparse tensor and its transpose
+            return t, t.T, None
         
         else:
             # symmetrize the output
@@ -507,45 +531,44 @@ class NeuralIFWithRCM(NeuralIF):
     baked into the forward pass.
     """
     def forward(self, data):
-        # 1) Compute RCM permutation
+    # 1) Compute RCM permutation
         with torch.no_grad():
             n = data.x.size(0)
-            # Convert to a SciPy CSR matrix to compute the reordering
             A_csr = to_scipy_sparse_matrix(data.edge_index, data.edge_attr, (n, n)).tocsr()
-
-            # Use Reverse Cuthill-McKee to get the permutation array
-            perm_np = reverse_cuthill_mckee(A_csr)
-
+            perm_np = reverse_cuthill_mckee(A_csr) # <-- Make sure you've imported this
             p = torch.as_tensor(perm_np, dtype=torch.long, device=data.x.device)
             invp = torch.empty_like(p)
             invp[p] = torch.arange(p.numel(), device=p.device)
 
-        # 2) Permute the graph data object using the new ordering 'p'
+    # 2) Permute the graph data object
         data.x = data.x[p]
         if hasattr(data, 'batch'):
             data.batch = data.batch[p]
         data.edge_index = invp[data.edge_index]
-        # edge_attr aligns automatically with the permuted edge_index
 
-        # 3) Call the base NeuralIF.forward on the reordered graph
+    # 3) Call the base NeuralIF.forward on the reordered graph
         out1, out2, node_out = super().forward(data)
 
-        # 4) Invert permutation on outputs
+    # 4) Invert permutation on outputs to return them to the original ordering
         def invert_tensor(M):
             if isinstance(M, torch.Tensor) and M.is_sparse:
-                idx, vals = M._indices(), M._values()
-                i, j = idx[0], idx[1]
-                new_idx = torch.stack([invp[i], invp[j]], dim=0)
+            # For sparse tensors, permute the indices
+                idx, vals = M.coalesce().indices(), M.coalesce().values()
+                new_idx = p[idx] # Apply original permutation 'p' to bring back
                 return torch.sparse_coo_tensor(new_idx, vals, M.shape, device=M.device)
-            elif isinstance(M, torch.Tensor):
-                return M[invp][:, invp]
-            else:
-                return M  # e.g., a scalar or None
+            elif isinstance(M, torch.Tensor) and node_out is not None:
+                # This case is tricky, for dense tensors or node_out, use the inverse perm
+                # For now we focus on the sparse case which is the primary output
+                pass # Add your specific logic if needed
+            return M # Return scalars or None as is
 
         L = invert_tensor(out1)
-        # out2 is either U (sparse) or a scalar/reg term
-        U_or_reg = invert_tensor(out2) if (isinstance(out2, torch.Tensor) and out2.is_sparse) else out2
-        node_out = node_out[invp] if isinstance(node_out, torch.Tensor) else node_out
+    # The second output can be a tensor (U) or a scalar (regularizer)
+        U_or_reg = invert_tensor(out2) if isinstance(out2, torch.Tensor) else out2
+    
+    # The node_out tensor should be permuted back using the inverse permutation
+        if isinstance(node_out, torch.Tensor):
+            node_out = node_out[invp]
 
         return L, U_or_reg, node_out
 
@@ -692,26 +715,3 @@ class LearnedLU(nn.Module):
 ############################
 #         HELPERS          #
 ############################
-    
-
-class ToLowerTriangular(torch_geometric.transforms.BaseTransform):
-    def __init__(self, inplace=False):
-        self.inplace = inplace
-        
-    def __call__(self, data, order=None):
-        if not self.inplace:
-            data = data.clone()
-        
-        # TODO: if order is given use that one instead
-        if order is not None:
-            raise NotImplementedError("Custom ordering not yet implemented...")
-        
-        # transform the data into lower triag graph
-        # this should be a data transformation (maybe?)
-        rows, cols = data.edge_index[0], data.edge_index[1]
-        fil = cols <= rows
-        l_index = data.edge_index[:, fil]
-        edge_embedding = data.edge_attr[fil]
-        
-        data.edge_index, data.edge_attr = l_index, edge_embedding
-        return data
