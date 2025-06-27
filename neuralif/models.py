@@ -273,7 +273,7 @@ class NeuralPCG(nn.Module):
                                         size=(size, size))
             t = t.coalesce()
             
-            return t, None, None
+            return t, t.T, None
 
 
 class PreCondNet(nn.Module):
