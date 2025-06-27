@@ -6,7 +6,6 @@ import torch_geometric.nn as pyg
 from torch_geometric.nn import aggr
 from torch_geometric.utils import to_scipy_sparse_matrix
 from scipy.sparse import tril
-from scipy.sparse.csgraph import nested_dissection
 from apps.data import graph_to_matrix, augment_features
 import aggr
 from neuralif.utils import TwoHop, gershgorin_norm
