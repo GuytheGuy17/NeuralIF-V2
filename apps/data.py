@@ -87,3 +87,35 @@ def graph_to_matrix(data, normalize=False):
         b = b / torch.linalg.norm(b)
         
     return A, b
+
+def augment_features(data, skip_rhs=False):
+    # transform nodes to include more features
+    
+    if skip_rhs:
+        # use instead notde position as an input feature!
+        data.x = torch.arange(data.x.size()[0], device=data.x.device).unsqueeze(1)
+    
+    data = torch_geometric.transforms.LocalDegreeProfile()(data)
+    
+    # diagonal dominance and diagonal decay from the paper
+    row, col = data.edge_index
+    diag = (row == col)
+    diag_elem = torch.abs(data.edge_attr[diag])
+    # remove diagonal elements by setting them to zero
+    non_diag_elem = data.edge_attr.clone()
+    non_diag_elem[diag] = 0
+    
+    row_sums = aggr.SumAggregation()(torch.abs(non_diag_elem), row)
+    alpha = diag_elem / row_sums
+    row_dominance_feature = alpha / (alpha + 1)
+    row_dominance_feature = torch.nan_to_num(row_dominance_feature, nan=1.0)
+    
+    # compute diagonal decay features
+    row_max = aggr.MaxAggregation()(torch.abs(non_diag_elem), row)
+    alpha = diag_elem / row_max
+    row_decay_feature = alpha / (alpha + 1)
+    row_decay_feature = torch.nan_to_num(row_decay_feature, nan=1.0)
+    
+    data.x = torch.cat([data.x, row_dominance_feature, row_decay_feature], dim=1)
+    
+    return data
