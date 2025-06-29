@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import numml as nm
 from torch_geometric.utils import from_scipy_sparse_matrix
 
 import ilupp
