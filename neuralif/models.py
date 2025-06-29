@@ -115,6 +115,10 @@ class GraphNet(nn.Module):
         
     def forward(self, x, edge_index, edge_attr, g=None):
         row, col = edge_index
+            # Add this check to ensure edge_attr is always a 2D tensor
+        if edge_attr.dim() == 1:
+            edge_attr = edge_attr.view(-1, 1)
+        
         
         if self.global_block is not None:
             assert g is not None, "Need global features for global block"
