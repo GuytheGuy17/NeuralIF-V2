@@ -380,59 +380,43 @@ class NeuralIF(nn.Module):
         
         self.global_features = kwargs["global_features"]
         self.latent_size = kwargs["latent_size"]
-        # node features are augmented with local degree profile
         self.augment_node_features = kwargs["augment_nodes"]
         
         num_node_features = 8 if self.augment_node_features else 1
         message_passing_steps = kwargs["message_passing_steps"]
         
-        # edge feature representation in the latent layers
         edge_features = kwargs.get("edge_features", 1)
         
         self.skip_connections = kwargs["skip_connections"]
         
         self.mps = torch.nn.ModuleList()
         for l in range(message_passing_steps):
-            # skip connections are added to all layers except the first one
             self.mps.append(MP_Block(skip_connections=self.skip_connections,
-                                     first=l==0,
-                                     last=l==(message_passing_steps-1),
-                                     edge_features=edge_features,
-                                     node_features=num_node_features,
-                                     global_features=self.global_features,
-                                     hidden_size=self.latent_size,
-                                     activation=kwargs["activation"],
-                                     aggregate=kwargs["aggregate"]))
+                                      first=l==0,
+                                      last=l==(message_passing_steps-1),
+                                      edge_features=edge_features,
+                                      node_features=num_node_features,
+                                      global_features=self.global_features,
+                                      hidden_size=self.latent_size,
+                                      activation=kwargs["activation"],
+                                      aggregate=kwargs["aggregate"]))
         
-        # node decodings
-        self.node_decoder = MLP([num_node_features, self.latent_size, 1]) if kwargs["decode_nodes"] else None
-        
-        # diag-aggregation for normalization of rows
-        self.normalize_diag = kwargs["normalize_diag"] if "normalize_diag" in kwargs else False
+        self.node_decoder = MLP([num_node_features, self.latent_size, 1]) if kwargs.get("decode_nodes") else None
+        self.normalize_diag = kwargs.get("normalize_diag", False)
         self.diag_aggregate = aggr.SumAggregation()
-        
-        # normalization
-        self.graph_norm = pyg.norm.GraphNorm(num_node_features) if ("graph_norm" in kwargs and kwargs["graph_norm"]) else None
-        
-        # drop tolerance and additional fill-ins and more sparsity
+        self.graph_norm = pyg.norm.GraphNorm(num_node_features) if kwargs.get("graph_norm") else None
         self.tau = drop_tol
         self.two = kwargs.get("two_hop", False)
         
     def forward(self, data):
-        # ! data could be batched here...(not implemented)
-        
         if self.augment_node_features:
             data = augment_features(data, skip_rhs=True)
             
-        # add additional edges to the data
         if self.two:
             data = TwoHop()(data)
-        
-        # * in principle it is possible to integrate reordering here.
-        
+            
         data = ToLowerTriangular()(data)
         
-        # get the input data
         edge_embedding = data.edge_attr
         l_index = data.edge_index
         
@@ -441,94 +425,67 @@ class NeuralIF(nn.Module):
         else:
             node_embedding = data.x
         
-        # copy the input data (only edges of original matrix A)
         a_edges = edge_embedding.clone()
+
+        # --- DEBUGGING PRINT STATEMENT 1 ---
+        print(f"[DEBUG] Initial a_edges shape: {a_edges.shape}")
+        
         if a_edges.dim() == 1:
             a_edges = a_edges.view(-1, 1)
+
+        # --- DEBUGGING PRINT STATEMENT 2 ---
+        print(f"[DEBUG] Reshaped a_edges shape: {a_edges.shape}")
         
+        global_features = None
         if self.global_features > 0:
             global_features = torch.zeros((1, self.global_features), device=data.x.device, requires_grad=False)
-            # feature ideas: nnz, 1-norm, inf-norm col/row var, min/max variability, avg distances to nnz
-        else:
-            global_features = None
         
-        # compute the output of the network
         for i, layer in enumerate(self.mps):
             if i != 0 and self.skip_connections:
+                # --- DEBUGGING PRINT STATEMENT 3 (The crucial one) ---
+                print("\n--- Inside Skip Connection ---")
+                print(f"[DEBUG] Current edge_embedding shape: {edge_embedding.shape}")
+                print(f"[DEBUG] a_edges shape before cat: {a_edges.shape}")
+                
                 edge_embedding = torch.cat([edge_embedding, a_edges], dim=1)
             
             edge_embedding, node_embedding, global_features = layer(node_embedding, l_index, edge_embedding, global_features)
         
-        # transform the output into a matrix
         return self.transform_output_matrix(node_embedding, l_index, edge_embedding, a_edges)
 
     def transform_output_matrix(self, node_x, edge_index, edge_values, a_edges):
-        # force diagonal to be positive
         diag = edge_index[0] == edge_index[1]
         
-        # normalize diag such that it has zero residual    
         if self.normalize_diag:
-            # copy the diag of matrix A
+            if a_edges.dim() > 1:
+                a_edges = a_edges.squeeze() # Ensure a_edges is 1D for this part
             a_diag = a_edges[diag]
             
-            # compute the row norm
             square_values = torch.pow(edge_values, 2)
             aggregated = self.diag_aggregate(square_values, edge_index[0])
             
-            # now, we renormalize the edge values such that they are the square root of the original value...
             edge_values = torch.sqrt(a_diag[edge_index[0]]) * edge_values / torch.sqrt(aggregated[edge_index[0]])
-        
         else:
-            # otherwise, just take the edge values as they are...
-            # but take the square root as it is numerically better
-            # edge_values[diag] = torch.exp(edge_values[diag])
             edge_values[diag] = torch.sqrt(torch.exp(edge_values[diag]))
         
-        # node decoder
         node_output = self.node_decoder(node_x).squeeze() if self.node_decoder is not None else None
-            
-        # ! this if should only be activated when the model is in production!!
+        
         if torch.is_inference_mode_enabled():
-            
-            # we can decide to remove small elements during inference from the preconditioner matrix
             if self.tau != 0:
                 small_value = (torch.abs(edge_values) <= self.tau).squeeze()
-                
-                # small value and not diagonal
                 elems = torch.logical_and(small_value, torch.logical_not(diag))
-                
-                # might be able to do this easily!
                 edge_values[elems] = 0
-                
-                # remove zeros from the sparse representation
                 filt = (edge_values != 0).squeeze()
                 edge_values = edge_values[filt]
                 edge_index = edge_index[:, filt]
             
-            # ! this is the way to go!!
-            # Doing pytorch -> scipy -> numml is a lot faster than pytorch -> numml on CPU
-            # On GPU it is faster to go to pytorch -> numml -> CPU
-            
-            # convert to scipy sparse matrix
-            # m = to_scipy_sparse_matrix(edge_index, matrix_values)
             m = torch.sparse_coo_tensor(edge_index, edge_values.squeeze(),
                                         size=(node_x.size()[0], node_x.size()[0]))
-                                        # type=torch.double)
-            
-            
             return m, m.T, node_output
-        
         else:
-            # For training and testing (computing regular losses for examples.)
-            # does not need to be performance optimized!
-            # use torch sparse directly
             t = torch.sparse_coo_tensor(edge_index, edge_values.squeeze(),
                                         size=(node_x.size()[0], node_x.size()[0]))
-            
-            # normalized l1 norm is best computed here!
-            # l2_nn = torch.linalg.norm(edge_values, ord=2)
             l1_penalty = torch.sum(torch.abs(edge_values)) / len(edge_values)
-            
             return t, l1_penalty, node_output
 
 class NeuralIFWithRCM(NeuralIF):
