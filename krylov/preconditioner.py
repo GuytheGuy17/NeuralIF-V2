@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from torch_geometric.utils import from_scipy_sparse_matrix
 
-import ilupp
+# import ilupp
 
 from neuralif.utils import torch_sparse_to_scipy, time_function
 from neuralif.models import NeuralIF
@@ -74,14 +74,14 @@ class JacobiPreconditioner(Preconditioner):
         return self.P@x
 
 
-class ICholPreconditioner(Preconditioner):
-    def __init__(self, A, **kwargs):
+# class ICholPreconditioner(Preconditioner):
+    # def __init__(self, A, **kwargs):
         super().__init__(A, **kwargs)
         
         self.timed_setup(A, **kwargs)
         self.nnz = self.L.nnz
         
-    def setup(self, A, **kwargs):
+    # def setup(self, A, **kwargs):
         
         fill_in = kwargs.get("fill_in", 0.0)
         threshold = kwargs.get("threshold", 0.0)
@@ -100,31 +100,31 @@ class ICholPreconditioner(Preconditioner):
         self.L, _ = from_scipy_sparse_matrix(icholprec)
         self.U, _ = from_scipy_sparse_matrix(icholprec.T)
     
-    def get_p_matrix(self):
+    # def get_p_matrix(self):
         return self.L@self.U
       
-    def __call__(self, x):
+    # def __call__(self, x):
         return fb_solve(self.L, self.U, x)
 
 
-class ILUPreconditioner(Preconditioner):
-    def __init__(self, A, **kwargs):
+# class ILUPreconditioner(Preconditioner):
+    # def __init__(self, A, **kwargs):
         super().__init__(A, **kwargs)
         self.timed_setup(A, **kwargs)
         
         # don't count the diagonal twice in the process...
         self.nnz = self.L.nnz + self.U.nnz - A.shape[0]
     
-    def get_inverse(self):
+    # def get_inverse(self):
         L_inv = torch.inverse(self.L.to_dense())
         U_inv = torch.inverse(self.U.to_dense())
         
         return U_inv@L_inv
     
-    def get_p_matrix(self):
+    # def get_p_matrix(self):
         return self.L@self.U
     
-    def setup(self, A, **kwargs):
+    # def setup(self, A, **kwargs):
         # compute ILU preconditioner using ilupp
         B = ilupp.ILU0Preconditioner(A.astype(np.float64).tocsr())
         
@@ -138,7 +138,7 @@ class ILUPreconditioner(Preconditioner):
         self.L, _ = from_scipy_sparse_matrix(L)
         self.U, _ = from_scipy_sparse_matrix(U)
 
-    def __call__(self, x):
+    # def __call__(self, x):
         return fb_solve(self.L, self.U, x)
 
 
