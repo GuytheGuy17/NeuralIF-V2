@@ -62,7 +62,7 @@ def get_dataloader(dataset_name, batch_size=1, mode="train"):
     by loading graph files from the corresponding directory.
     """
     # Construct the path automatically based on the dataset name and mode
-    folder_path = os.path.join('./data', dataset_name, mode)
+    folder_path = os.path.join(folder_path, mode)
     
     # Instantiate our generalized FolderDataset
     dataset = FolderDataset(folder_path=folder_path)
