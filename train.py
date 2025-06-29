@@ -119,11 +119,12 @@ def main(config):
     train_loader = get_dataloader(dataset_name=config["dataset"], 
                                   batch_size=config["batch_size"], 
                                   mode="train")
+    # If a specific validation path is given, use it. Otherwise, use the main dataset path.
+    validation_path = config["validation_dataset"] if config["validation_dataset"] is not None else config["dataset"]
 
-    validation_loader = get_dataloader(dataset_name=config["dataset"],
-                                       batch_size=1, # Always use batch size 1 for validation
-                                       mode="val")
-    best_val = float("inf")
+    validation_loader = get_dataloader(dataset_name=validation_path,
+                                        batch_size=1,
+                                        mode="val")
     logger = TrainResults(folder)
     
     # todo: compile the model
@@ -254,6 +255,8 @@ def argparser():
                     help="normalize each sketch by ||A z||")
     parser.add_argument("--use_rademacher", action="store_true",
                     help="draw +/-1 sketches instead of Gaussian")
+    parser.add_argument("--validation_dataset", type=str, default=None,
+                    help="Path to the validation dataset directory.")
     
     parser.add_argument("--regularizer", type=float, default=0)
     parser.add_argument("--scheduler", action='store_true', default=False)
