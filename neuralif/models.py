@@ -106,7 +106,7 @@ class GraphNet(nn.Module):
                               activation=activation)
         
         # optional set of blocks for global GNN
-        self.global_block = None
+        self.global_block = None    
         if global_features > 0:
             self.global_block = MLP([edge_features_out + node_features + global_features, 
                                      hidden_size,
@@ -118,7 +118,7 @@ class GraphNet(nn.Module):
             # Add this check to ensure edge_attr is always a 2D tensor
         if edge_attr.dim() == 1:
             edge_attr = edge_attr.view(-1, 1)
-        
+
         
         if self.global_block is not None:
             assert g is not None, "Need global features for global block"
@@ -443,6 +443,8 @@ class NeuralIF(nn.Module):
         
         # copy the input data (only edges of original matrix A)
         a_edges = edge_embedding.clone()
+        if a_edges.dim() == 1:
+            a_edges = a_edges.view(-1, 1)
         
         if self.global_features > 0:
             global_features = torch.zeros((1, self.global_features), device=data.x.device, requires_grad=False)
