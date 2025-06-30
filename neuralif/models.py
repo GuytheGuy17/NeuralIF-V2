@@ -430,51 +430,41 @@ class NeuralIF(nn.Module):
         self.tau = drop_tol
         self.two = kwargs.get("two_hop", False)
         
+    # In your model script, inside class NeuralIF
+
     def forward(self, data):
         if self.augment_node_features:
             data = augment_features(data, skip_rhs=True)
-            
+        
         if self.two:
             data = TwoHop()(data)
-            
-        data = ToLowerTriangular()(data)
         
+        data = ToLowerTriangular()(data)
+    
         edge_embedding = data.edge_attr
         l_index = data.edge_index
-        
+    
         if self.graph_norm is not None:
             node_embedding = self.graph_norm(data.x, batch=data.batch)
         else:
             node_embedding = data.x
-        
+    
         a_edges = edge_embedding.clone()
 
-        # --- DEBUGGING PRINT STATEMENT 1 ---
-        print(f"[DEBUG] Initial a_edges shape: {a_edges.shape}")
-        
         if a_edges.dim() == 1:
             a_edges = a_edges.view(-1, 1)
 
-        # --- DEBUGGING PRINT STATEMENT 2 ---
-        print(f"[DEBUG] Reshaped a_edges shape: {a_edges.shape}")
-        
         global_features = None
         if self.global_features > 0:
             global_features = torch.zeros((1, self.global_features), device=data.x.device, requires_grad=False)
-        
+    
         for i, layer in enumerate(self.mps):
             if i != 0 and self.skip_connections:
-                # --- DEBUGGING PRINT STATEMENT 3 (The crucial one) ---
-                print("\n--- Inside Skip Connection ---")
-                print(f"[DEBUG] Current edge_embedding shape: {edge_embedding.shape}")
-                print(f"[DEBUG] a_edges shape before cat: {a_edges.shape}")
-                
                 edge_embedding = torch.cat([edge_embedding, a_edges], dim=1)
-            
-            edge_embedding, node_embedding, global_features = layer(node_embedding, l_index, edge_embedding, global_features)
         
+            edge_embedding, node_embedding, global_features = layer(node_embedding, l_index, edge_embedding, global_features)
+    
         return self.transform_output_matrix(node_embedding, l_index, edge_embedding, a_edges)
-
 # In NeuralIF
     def transform_output_matrix(self, node_x, edge_index, edge_values, a_edges):
     # Clone the tensor to avoid in-place modification and to save the original output
