@@ -486,7 +486,9 @@ class NeuralIF(nn.Module):
             output_edge_values = torch.sqrt(a_diag[edge_index[0]]) * output_edge_values / torch.sqrt(aggregated[edge_index[0]])
         else:
         # Modify the CLONED tensor, not the original
-            output_edge_values[diag] = torch.sqrt(torch.exp(output_edge_values[diag]))
+            predicted_diag = torch.sqrt(torch.exp(output_edge_values[diag]))
+            output_edge_values[diag] = predicted_diag + 1e-4
+
     
         node_output = self.node_decoder(node_x).squeeze() if self.node_decoder is not None else None
     

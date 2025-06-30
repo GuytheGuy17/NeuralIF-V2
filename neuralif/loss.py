@@ -134,7 +134,7 @@ def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3):
         rz_old = (r * z).sum()
         
         pAp = (p * Ap).sum()
-        alpha = rz_old / (pAp + 1e-16)
+        alpha = rz_old / (pAp + 1e-10)  # Avoid division by zero
         
         print(f"[DEBUG] rz_old: {rz_old.item()}, pAp: {pAp.item()}, alpha: {alpha.item()}")
         if torch.isnan(alpha):
