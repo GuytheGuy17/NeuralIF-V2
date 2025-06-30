@@ -185,21 +185,24 @@ class LearnedPreconditioner(Preconditioner):
 def fb_solve(L, U, r, unit_upper=False):
     """
     A robust forward-backward solve for the preconditioner M=L*U.
-    Handles sparse to dense conversion.
+    Handles sparse to dense conversion and vector-to-matrix reshaping.
     """
-    # FIX 1: Convert the sparse L and U matrices to dense for the solver
     L_dense = L.to_dense()
     U_dense = U.to_dense()
 
-    # FIX 2: Call the correct torch.linalg.solve_triangular function
-    
+    # --- FIX: Reshape the input vector `r` into a matrix for the solver ---
+    # The solver expects a 2D tensor (a matrix), so we convert our 1D vector.
+    r_mat = r.view(-1, 1)
+
     # Forward solve: y = L_inv * r
-    y = torch.linalg.solve_triangular(L_dense, r, upper=False)
+    y_mat = torch.linalg.solve_triangular(L_dense, r_mat, upper=False)
     
     # Backward solve: x = U_inv * y
-    x = torch.linalg.solve_triangular(U_dense, y, upper=True, unitriangular=unit_upper)
+    x_mat = torch.linalg.solve_triangular(U_dense, y_mat, upper=True, unitriangular=unit_upper)
     
-    return x
+    # --- FIX: Squeeze the output matrix back into a vector ---
+    # The CG algorithm expects a 1D vector, so we remove the extra dimension.
+    return x_mat.squeeze()
 
 
 def fb_solve_joint(LU, r):
