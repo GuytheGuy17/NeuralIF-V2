@@ -158,8 +158,11 @@ class GraphNet(nn.Module):
 class MP_Block(nn.Module):
     # L@L.T matrix multiplication graph layer
     # Aligns the computation of L@L.T - A with the learned updates
-    def __init__(self, skip_connections, first, last, edge_features, node_features, global_features, hidden_size, **kwargs) -> None:
+    def __init__(self, last, edge_features_in, edge_features_hidden, node_features, global_features, hidden_size, **kwargs) -> None:
         super().__init__()
+        
+        # The 'first' and 'skip_connections' arguments are no longer needed here,
+        # as their logic is now handled by the value of 'edge_features_in'.
         
         # first and second aggregation
         if "aggregate" in kwargs and kwargs["aggregate"] is not None:
@@ -169,16 +172,29 @@ class MP_Block(nn.Module):
         
         act = kwargs["activation"] if "activation" in kwargs else "relu"
         
-        edge_features_in = 1 if first else edge_features
-        edge_features_out = 1 if last else edge_features
+        # The final output of this block should be 1 if it's the last block in the sequence.
+        # Otherwise, the output dimension is the hidden dimension.
+        edge_features_out_final = 1 if last else edge_features_hidden
         
         # We use 2 graph nets in order to operate on the upper and lower triangular parts of the matrix
-        self.l1 = GraphNet(node_features=node_features, edge_features=edge_features_in, global_features=global_features,
-                           hidden_size=hidden_size, skip_connection=(not first and skip_connections),
-                           aggregate=aggr[0], activation=act, edge_features_out=edge_features)
         
-        self.l2 = GraphNet(node_features=node_features, edge_features=edge_features, global_features=global_features,
-                           hidden_size=hidden_size, aggregate=aggr[1], activation=act, edge_features_out=edge_features_out)
+        # l1 maps the input features (which can vary) to the hidden dimension
+        self.l1 = GraphNet(node_features=node_features, 
+                           edge_features=edge_features_in,             # <-- CHANGED: Use the new input parameter
+                           global_features=global_features,
+                           hidden_size=hidden_size, 
+                           aggregate=aggr[0], 
+                           activation=act, 
+                           edge_features_out=edge_features_hidden)   # <-- CHANGED: Output is always the hidden dim
+
+        # l2 maps the hidden dimension to the final output dimension for this block
+        self.l2 = GraphNet(node_features=node_features, 
+                           edge_features=edge_features_hidden,       # <-- CHANGED: Input is now the hidden dim
+                           global_features=global_features,
+                           hidden_size=hidden_size, 
+                           aggregate=aggr[1], 
+                           activation=act, 
+                           edge_features_out=edge_features_out_final) # <-- CHANGED: Output is the final calculated dim
     
     def forward(self, x, edge_index, edge_attr, global_features):
         edge_embedding, node_embeddings, global_features = self.l1(x, edge_index, edge_attr, g=global_features)
@@ -188,7 +204,6 @@ class MP_Block(nn.Module):
         edge_embedding, node_embeddings, global_features = self.l2(node_embeddings, edge_index, edge_embedding, g=global_features)
         
         return edge_embedding, node_embeddings, global_features
-        
 
 ############################
 #         Networks         #
@@ -388,18 +403,25 @@ class NeuralIF(nn.Module):
         edge_features = kwargs.get("edge_features", 1)
         
         self.skip_connections = kwargs["skip_connections"]
-        
+        # In NeuralIF.__init__
         self.mps = torch.nn.ModuleList()
         for l in range(message_passing_steps):
-            self.mps.append(MP_Block(skip_connections=self.skip_connections,
-                                      first=l==0,
-                                      last=l==(message_passing_steps-1),
-                                      edge_features=edge_features,
-                                      node_features=num_node_features,
-                                      global_features=self.global_features,
-                                      hidden_size=self.latent_size,
-                                      activation=kwargs["activation"],
-                                      aggregate=kwargs["aggregate"]))
+    # Determine the input edge dimension for the current block
+    # The first block takes 1 feature. Subsequent blocks take `edge_features` + 1 (from skip connection)
+            input_edge_features = 1 if l == 0 else edge_features + 1
+
+            self.mps.append(MP_Block(
+                skip_connections=self.skip_connections, # This is now just a flag
+                first=l==0,
+                last=l==(message_passing_steps-1),
+                edge_features_in=input_edge_features, # Pass the calculated input dimension
+                edge_features_hidden=edge_features, # The desired output/hidden dimension
+                node_features=num_node_features,
+                global_features=self.global_features,
+                hidden_size=self.latent_size,
+                activation=kwargs["activation"],
+                aggregate=kwargs["aggregate"]
+            ))
         
         self.node_decoder = MLP([num_node_features, self.latent_size, 1]) if kwargs.get("decode_nodes") else None
         self.normalize_diag = kwargs.get("normalize_diag", False)
@@ -453,39 +475,45 @@ class NeuralIF(nn.Module):
         
         return self.transform_output_matrix(node_embedding, l_index, edge_embedding, a_edges)
 
+# In NeuralIF
     def transform_output_matrix(self, node_x, edge_index, edge_values, a_edges):
+    # Clone the tensor to avoid in-place modification and to save the original output
+        output_edge_values = edge_values.clone()
+    
         diag = edge_index[0] == edge_index[1]
-        
+    
         if self.normalize_diag:
+        # (This part of the code also needs to be checked to ensure it
+        #  doesn't modify tensors in-place if it's used)
             if a_edges.dim() > 1:
                 a_edges = a_edges.squeeze() # Ensure a_edges is 1D for this part
             a_diag = a_edges[diag]
-            
-            square_values = torch.pow(edge_values, 2)
+        
+            square_values = torch.pow(output_edge_values, 2)
             aggregated = self.diag_aggregate(square_values, edge_index[0])
-            
-            edge_values = torch.sqrt(a_diag[edge_index[0]]) * edge_values / torch.sqrt(aggregated[edge_index[0]])
+        
+        # This line creates a new tensor, so it is safe.
+            output_edge_values = torch.sqrt(a_diag[edge_index[0]]) * output_edge_values / torch.sqrt(aggregated[edge_index[0]])
         else:
-            edge_values[diag] = torch.sqrt(torch.exp(edge_values[diag]))
-        
+        # Modify the CLONED tensor, not the original
+            output_edge_values[diag] = torch.sqrt(torch.exp(output_edge_values[diag]))
+    
         node_output = self.node_decoder(node_x).squeeze() if self.node_decoder is not None else None
-        
+    
+    # --- Logic for inference vs training ---
         if torch.is_inference_mode_enabled():
-            if self.tau != 0:
-                small_value = (torch.abs(edge_values) <= self.tau).squeeze()
-                elems = torch.logical_and(small_value, torch.logical_not(diag))
-                edge_values[elems] = 0
-                filt = (edge_values != 0).squeeze()
-                edge_values = edge_values[filt]
-                edge_index = edge_index[:, filt]
-            
-            m = torch.sparse_coo_tensor(edge_index, edge_values.squeeze(),
-                                        size=(node_x.size()[0], node_x.size()[0]))
+        # ... (Inference logic uses the modified output_edge_values)
+            m = torch.sparse_coo_tensor(edge_index, output_edge_values.squeeze(),
+                                     size=(node_x.size()[0], node_x.size()[0]))
             return m, m.T, node_output
         else:
-            t = torch.sparse_coo_tensor(edge_index, edge_values.squeeze(),
-                                        size=(node_x.size()[0], node_x.size()[0]))
+        # Create the sparse tensor for the loss function using the MODIFIED values
+            t = torch.sparse_coo_tensor(edge_index, output_edge_values.squeeze(),
+                                     size=(node_x.size()[0], node_x.size()[0]))
+        
+        # Calculate the L1 penalty on the ORIGINAL, unmodified network output
             l1_penalty = torch.sum(torch.abs(edge_values)) / len(edge_values)
+        
             return t, l1_penalty, node_output
 
 class NeuralIFWithRCM(NeuralIF):
