@@ -104,8 +104,9 @@ def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3):
     the mean relative residual over those steps:
         mean_i ||r_i|| / ||r_0||
     """
-    # --- FIX: Convert sparse L and U to dense matrices for the solver ---
-    # This is the crucial step that resolves the 'SparseCPU' and 'SparseCUDA' errors.
+    # --- Start of Debug Version ---
+    print("\n--- [DEBUG] Entering pcg_proxy ---")
+
     L_dense = L_mat.to_dense()
     U_dense = U_mat.to_dense()
     
@@ -115,31 +116,61 @@ def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3):
     r = b.clone()
     r0_norm = torch.linalg.vector_norm(r, 2) + 1e-16
 
-    # Precondition initial residual: z0 = M^{-1} r0
     z = torch.linalg.solve_triangular(L_dense, r, upper=False)
     z = torch.linalg.solve_triangular(U_dense, z, upper=True)
+    
+    # Check for NaNs after initial preconditioning
+    if torch.isnan(z).any():
+        print("[FATAL] NaN detected in 'z' after initial solve. Exiting.")
+        # Returning a large number instead of nan to allow training to continue if needed
+        return torch.tensor(1e6, device=A.device)
+
     p = z.clone()
 
     residuals = []
     for i in range(cg_steps):
+        print(f"\n[DEBUG] CG Step {i+1}")
         Ap = A @ p
         rz_old = (r * z).sum()
         
-        alpha = rz_old / ((p * Ap).sum() + 1e-16)
+        pAp = (p * Ap).sum()
+        alpha = rz_old / (pAp + 1e-16)
+        
+        print(f"[DEBUG] rz_old: {rz_old.item()}, pAp: {pAp.item()}, alpha: {alpha.item()}")
+        if torch.isnan(alpha):
+            print("[FATAL] alpha is NaN!")
+            return torch.tensor(1e6, device=A.device)
+
         x = x + alpha * p
         
         if i < cg_steps - 1:
-            r = r - alpha * Ap
+            r_new = r - alpha * Ap
+        else: # On the last step, r_new is not needed for the next beta
+            r_new = r 
         
-        residuals.append(torch.linalg.vector_norm(r, 2) / r0_norm)
+        residuals.append(torch.linalg.vector_norm(r_new, 2) / r0_norm)
+        
+        # Check if residual is nan before the next step
+        if torch.isnan(residuals[-1]).any():
+             print(f"[FATAL] Residual at step {i+1} is NaN!")
+             return torch.tensor(1e6, device=A.device)
 
-        # Precondition for next step
+        r = r_new # Update r
+        
         z = torch.linalg.solve_triangular(L_dense, r, upper=False)
         z = torch.linalg.solve_triangular(U_dense, z, upper=True)
         
-        beta = (r * z).sum() / (rz_old + 1e-16)
+        rz_new = (r * z).sum()
+        beta = rz_new / (rz_old + 1e-16)
+
+        print(f"[DEBUG] rz_new: {rz_new.item()}, beta: {beta.item()}")
+        if torch.isnan(beta):
+            print("[FATAL] beta is NaN!")
+            return torch.tensor(1e6, device=A.device)
+
         p = z + beta * p
 
+    print("--- [DEBUG] Exiting pcg_proxy successfully ---")
     return torch.stack(residuals).mean()
 
 def improved_sketch_with_pcg(
