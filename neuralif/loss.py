@@ -227,6 +227,8 @@ def loss(output, data, config=None, **kwargs):
     if config is None:
         # this is the regular loss used to train NeuralIF
         l = sketched_loss(output, A, normalized=False)
+    elif config == "sketched":
+        l = sketched_loss(output, A, normalized=kwargs.get("normalized", False))
     
     elif config == "normalized":
         l = sketched_loss(output, A, kwargs.get("c", None), normalized=True)
