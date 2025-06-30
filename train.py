@@ -149,20 +149,26 @@ def main(config):
             
             start = time.perf_counter()
             data = data.to(device)
-            
+            # In train.py -> main() -> training loop
             output, reg, _ = model(data)
+
+# --- FIX: Adapt the output for the loss function ---
+            if config["model"] == "neuralif":
+    # The loss function expects (L, U). For our model M = L*L.T, so U = L.T.
+    # The output from NeuralIF is L, so we create the tuple (L, L.T).
+                output = (output, output.T)
+
             l = loss(
                 output,
                 data,
                 config=config["loss"],
-                c=config.get("c", reg),           # pass through the reg if your loss needs it
+                c=config.get("c", reg),
                 num_sketches=config["num_sketches"],
                 pcg_steps=config["pcg_steps"],
                 pcg_weight=config["pcg_weight"],
                 normalized=config["normalized"],
                 use_rademacher=config["use_rademacher"],
-                )
-            
+            )
             #  if reg:
             #  l = l + config["regularizer"] * reg
             
