@@ -108,6 +108,11 @@ def main(config):
     else:
         raise NotImplementedError
     
+    if config["load_model_path"]:
+        print(f"Loading model weights from: {config['load_model_path']}")
+        model.load_state_dict(torch.load(config['load_model_path'], map_location=device))
+
+    
     model.to(device)
     
     print(f"Number params in model: {count_parameters(model)}")
@@ -263,7 +268,7 @@ def argparser():
                     help="draw +/-1 sketches instead of Gaussian")
     parser.add_argument("--validation_dataset", type=str, default=None,
                     help="Path to the validation dataset directory.")
-    
+    parser.add_argument("--load_model_path", type=str, default=None, help="Path to a saved model state_dict to start training from.")
     parser.add_argument("--regularizer", type=float, default=0)
     parser.add_argument("--scheduler", action='store_true', default=False)
     

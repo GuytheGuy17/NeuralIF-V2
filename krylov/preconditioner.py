@@ -145,16 +145,23 @@ class JacobiPreconditioner(Preconditioner):
 class LearnedPreconditioner(Preconditioner):
     def __init__(self, data, model, **kwargs):
         super().__init__(data, **kwargs)
-        
+    
         self.model = model
-        self.spd = isinstance(model, NeuralIF)
-        
+    # isinstance(model.model, ... for DataParallel wrapped models
+        self.spd = isinstance(model, NeuralIF) or \
+                    (isinstance(model, torch.nn.DataParallel) and isinstance(model.module, NeuralIF))
+    
         self.timed_setup(data, **kwargs)
-        
+    
         if self.spd:
-            self.nnz = self.L.nnz
-        else:      
-            self.nnz = self.L.nnz + self.U.nnz - data.x.shape[0]
+        # FIX: Use the correct PyTorch method to get the number of non-zero elements
+            self.nnz = self.L.coalesce().values().numel()
+        else:
+        # FIX: Apply the same fix here for both L and U
+            L_nnz = self.L.coalesce().values().numel()
+            U_nnz = self.U.coalesce().values().numel()
+        # The logic to subtract the diagonal (double counted in LU) is correct
+            self.nnz = L_nnz + U_nnz - data.x.shape[0]
         
     def setup(self, data, **kwargs):
         L, U, _ = self.model(data)
