@@ -182,21 +182,24 @@ class LearnedPreconditioner(Preconditioner):
         return fb_solve(self.L, self.U, x, unit_upper=not self.spd)
 
 
-def fb_solve(L, U, r, unit_lower=False, unit_upper=False):
-    # This function now uses PyTorch's native sparse triangular solver
-    # It assumes L, U, and r are PyTorch tensors on the same device (e.g., GPU)
-    
-    # Note: PyTorch's native solver does not support unit diagonals directly.
-    # This is usually not a problem for IC, but for ILU where U has unit diagonals,
-    # the factor U should be constructed with ones on the diagonal.
-    
-    # First solve: L * y = r (forward substitution)
-    y = torch.sparse.linalg.solve_triangular(L, r, upper=False)
+def fb_solve(L, U, r, unit_upper=False):
+    """
+    A robust forward-backward solve for the preconditioner M=L*U.
+    Handles sparse to dense conversion.
+    """
+    # FIX 1: Convert the sparse L and U matrices to dense for the solver
+    L_dense = L.to_dense()
+    U_dense = U.to_dense()
 
-    # Second solve: U * z = y (backward substitution)
-    z = torch.sparse.linalg.solve_triangular(U, y, upper=True)
-
-    return z
+    # FIX 2: Call the correct torch.linalg.solve_triangular function
+    
+    # Forward solve: y = L_inv * r
+    y = torch.linalg.solve_triangular(L_dense, r, upper=False)
+    
+    # Backward solve: x = U_inv * y
+    x = torch.linalg.solve_triangular(U_dense, y, upper=True, unitriangular=unit_upper)
+    
+    return x
 
 
 def fb_solve_joint(LU, r):
