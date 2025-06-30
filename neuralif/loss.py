@@ -106,28 +106,44 @@ def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3):
     """
     n = A.shape[0]
     # random right-hand side b and initial guess x0=0
-    b = torch.randn((n,1), device=A.device, dtype=A.dtype)
+    b = torch.randn((n, 1), device=A.device, dtype=A.dtype)
     x = torch.zeros_like(b)
     # initial residual
     r = b.clone()
     r0_norm = torch.linalg.vector_norm(r, 2) + 1e-16
-    # precondition initial residual: z0 = M^{-1} r0
-    z, _ = torch.linalg.solve_triangular(L_mat, r, lower=True)
-    z, _ = torch.linalg.solve_triangular(U_mat, z, lower=False)
+
+    # precondition initial residual: z0 = M^{-1} r0 = (U^{-1} . L^{-1}) r0
+    # FIX 1: Use `upper=False` instead of `lower=True`.
+    # FIX 2: Assign the result directly to `z`, don't unpack.
+    z = torch.linalg.solve_triangular(L_mat, r, upper=False)
+    # FIX 1: Use `upper=True` instead of `lower=False`.
+    # FIX 2: Assign the result directly to `z`, don't unpack.
+    z = torch.linalg.solve_triangular(U_mat, z, upper=True)
     p = z.clone()
 
     residuals = []
-    for _ in range(cg_steps):
+    # --- Start of CG loop ---
+    for i in range(cg_steps):
         Ap = A @ p
-        alpha = (r * z).sum() / (p * Ap).sum()
+        # To prevent division by zero for the last step's beta calculation
+        rz_old = (r * z).sum()
+        
+        alpha = rz_old / ((p * Ap).sum() + 1e-16)
         x = x + alpha * p
-        r = r - alpha * Ap
+        
+        # Check for early convergence to avoid issues with tiny residuals
+        if i < cg_steps - 1:
+            r = r - alpha * Ap
+        
         # record relative residual
         residuals.append(torch.linalg.vector_norm(r, 2) / r0_norm)
-        # precondition
-        z, _ = torch.linalg.solve_triangular(L_mat, r, lower=True)
-        z, _ = torch.linalg.solve_triangular(U_mat, z, lower=False)
-        beta = (r * z).sum() / ((p * Ap).sum() * alpha + 1e-16)
+
+        # precondition for next step
+        # FIX 1 & 2 applied here as well
+        z = torch.linalg.solve_triangular(L_mat, r, upper=False)
+        z = torch.linalg.solve_triangular(U_mat, z, upper=True)
+        
+        beta = (r * z).sum() / (rz_old + 1e-16)
         p = z + beta * p
 
     # return average relative residual
