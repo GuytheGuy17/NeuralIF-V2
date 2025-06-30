@@ -126,7 +126,7 @@ def main(config):
                                         batch_size=1,
                                         mode="val")
     logger = TrainResults(folder)
-    
+    best_val = float('inf')
     # todo: compile the model
     # compiled_model = torch.compile(model, mode="reduce-overhead")
     # model = torch_geometric.compile(model, mode="reduce-overhead")
