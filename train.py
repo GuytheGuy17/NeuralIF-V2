@@ -146,6 +146,17 @@ def main(config):
         start_epoch = time.perf_counter()
         
         for it, data in enumerate(train_loader):
+                        # Print statistics for the current graph
+            num_nodes = data.num_nodes
+            num_edges = data.num_edges
+            print(f"--- Epoch {epoch+1}, Iteration {it+1}/{len(train_loader)} ---")
+            print(f"Graph size: {num_nodes} nodes, {num_edges} edges.")
+
+            # Print current GPU memory usage
+            if device.type == 'cuda':
+                allocated_mem = torch.cuda.memory_allocated(device) / (1024**2) # In MB
+                reserved_mem = torch.cuda.memory_reserved(device) / (1024**2) # In MB
+                print(f"GPU Memory: {allocated_mem:.2f} MB Allocated / {reserved_mem:.2f} MB Reserved")
             # increase iteration count
             total_it += 1
             
