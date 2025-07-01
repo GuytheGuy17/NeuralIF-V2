@@ -209,7 +209,7 @@ def main(config):
             optimizer.step()
             optimizer.zero_grad()
         
-            logger.log(l.item(), grad_norm, time.perf_counter() - start)
+            # logger.log(l.item(), grad_norm, time.perf_counter() - start)
             
             # Do validation after 100 updates (to support big datasets)
             # convergence is expected to be pretty fast...
