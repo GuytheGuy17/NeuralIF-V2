@@ -86,7 +86,12 @@ def main(config):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=20)
     
     train_loader = get_dataloader(dataset_name=config["dataset"], batch_size=config["batch_size"], mode="train")
-    validation_loader = get_dataloader(dataset_name=config.get("validation_dataset", config["dataset"]), batch_size=1, mode="val")
+    # This line robustly determines the correct path for the validation set.
+    validation_path = config["validation_dataset"] if config["validation_dataset"] else config["dataset"]
+
+    validation_loader = get_dataloader(dataset_name=validation_path,
+                                       batch_size=1,
+                                       mode="val")
     
     logger = TrainResults(folder)
     best_val_loss = float('inf')
@@ -139,7 +144,7 @@ def main(config):
                 if config["scheduler"]:
                     scheduler.step(val_loss)
                 
-                # logger.log_val(val_loss, -1) # Logger needs to be fixed/verified separately
+                logger.log_val(val_loss, -1) # Logger needs to be fixed/verified separately
                 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
