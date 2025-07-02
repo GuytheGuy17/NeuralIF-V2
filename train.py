@@ -214,33 +214,33 @@ def main(config):
             
             # Do validation after 100 updates (to support big datasets)
             # convergence is expected to be pretty fast...
-            if (total_it + 1) % 1000 == 0:
-                print("\n--- Starting Validation ---")
+            # if (total_it + 1) % 1000 == 0:
+            #    print("\n--- Starting Validation ---")
     
     # Create a temporary copy of the model for validation
     # This prevents corrupting the optimizer's state
-                model_for_validation = copy.deepcopy(model)
+            #   model_for_validation = copy.deepcopy(model)
 
     # The validate function will move this copy to the CPU
-                val_its = validate(model_for_validation, validation_loader, solve=True, solver="gmres" if gmres else "cg")
+            #    val_its = validate(model_for_validation, validation_loader, solve=True, solver="gmres" if gmres else "cg")
     
     # The original model and optimizer on the GPU are untouched and remain in a valid state.
     
     # Optional: use the scheduler
-                if config["scheduler"]:
-                    scheduler.step(val_its)
+            #   if config["scheduler"]:
+            #        scheduler.step(val_its)
     
-                logger.log_val(None, val_its)
+             #   logger.log_val(None, val_its)
     
-                val_perf = val_its
+             #   val_perf = val_its
     
-                if val_perf < best_val:
-                    print(f"New best validation performance: {val_perf:.2f}. Saving model.")
-                    if config["save"]:
-                        torch.save(model.state_dict(), f"{folder}/best_model.pt")
-                    best_val = val_perf
+             #   if val_perf < best_val:
+              #      print(f"New best validation performance: {val_perf:.2f}. Saving model.")
+               #     if config["save"]:
+                #        torch.save(model.state_dict(), f"{folder}/best_model.pt")
+                 #   best_val = val_perf
     
-                print("--- Validation Complete ---\n")
+            #    print("--- Validation Complete ---\n")
 
         epoch_time = time.perf_counter() - start_epoch
         
