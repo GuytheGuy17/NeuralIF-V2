@@ -2,6 +2,7 @@ import os
 import glob
 import torch
 import torch_geometric
+from torch_geometric.nn import aggr
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import from_scipy_sparse_matrix
