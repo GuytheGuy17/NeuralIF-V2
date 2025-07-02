@@ -202,7 +202,7 @@ def argparser():
     parser.add_argument("--global_features", type=int, default=0)
     parser.add_argument("--edge_features", type=int, default=1)
     parser.add_argument("--graph_norm", action='store_true')
-    parser.add_-argument("--two_hop", action='store_true')
+    parser.add_argument("--two_hop", action='store_true')
     
     return parser.parse_args()
 
