@@ -113,7 +113,7 @@ def augment_features(data, skip_rhs=False):
     row_dominance_feature = torch.nan_to_num(row_dominance_feature, nan=1.0)
     
     # compute diagonal decay features
-    row_max = aggr.MaxAggregation()(torch.abs(non_diag_elem), row)
+    row_max = aggr.MaxAggregation()(torch.abs(non_diag_elem).unsqueeze(1), row)
     alpha = diag_elem / row_max
     row_decay_feature = alpha / (alpha + 1)
     row_decay_feature = torch.nan_to_num(row_decay_feature, nan=1.0)
