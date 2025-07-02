@@ -107,7 +107,7 @@ def augment_features(data, skip_rhs=False):
     non_diag_elem = data.edge_attr.clone()
     non_diag_elem[diag] = 0
     
-    row_sums = aggr.SumAggregation()(torch.abs(non_diag_elem), row)
+    row_sums = aggr.SumAggregation()(torch.abs(non_diag_elem).unsqueeze(1), row)
     alpha = diag_elem / row_sums
     row_dominance_feature = alpha / (alpha + 1)
     row_dominance_feature = torch.nan_to_num(row_dominance_feature, nan=1.0)
