@@ -112,48 +112,59 @@ class GraphNet(nn.Module):
                                      hidden_size,
                                      global_features],
                                     activation=activation)
-        
     def forward(self, x, edge_index, edge_attr, g=None):
         row, col = edge_index
-            # Add this check to ensure edge_attr is always a 2D tensor
+    
         if edge_attr.dim() == 1:
             edge_attr = edge_attr.view(-1, 1)
 
-        
+    # Prepare inputs for the edge block
+        sender_features = x[row]
+        receiver_features = x[col]
+
+        edge_inputs = [sender_features, receiver_features, edge_attr]
+
         if self.global_block is not None:
             assert g is not None, "Need global features for global block"
-            
-            # run the edge update and aggregate features
-            edge_embedding = self.edge_block(torch.cat([torch.ones(x[row].shape[0], 1, device=x.device) * g, 
-                                                        x[row], x[col], edge_attr], dim=1))
-            aggregation = self.aggregate(edge_embedding, row)
-            
-            
-            agg_features = torch.cat([torch.ones(x.shape[0], 1, device=x.device) * g, x, aggregation], dim=1)
-            node_embeddings = self.node_block(agg_features)
-            
-            # aggregate over all edges and nodes (always mean)
-            mp_global_aggr = g
-            edge_aggregation_global = self.global_aggregate(edge_embedding)
-            node_aggregation_global = self.global_aggregate(node_embeddings)
-            
-            # compute the new global embedding
-            # the old global feature is part of mp_global_aggr
-            global_embeddings = self.global_block(torch.cat([node_aggregation_global, 
-                                                             edge_aggregation_global,
-                                                             mp_global_aggr], dim=1))
-            
-            return edge_embedding, node_embeddings, global_embeddings
         
-        else:
-            # update edge features and aggregate
-            edge_embedding = self.edge_block(torch.cat([x[row], x[col], edge_attr], dim=1))
-            aggregation = self.aggregate(edge_embedding, row)
-            agg_features = torch.cat([x, aggregation], dim=1)
-            # update node features
-            node_embeddings = self.node_block(agg_features)
-            return edge_embedding, node_embeddings, None
+        # --- ROBUSTNESS FIX ---
+        # Explicitly expand the global features to match the number of edges.
+        # This prevents unintended broadcasting that can cause memory to explode.
+            num_edges = sender_features.shape[0]
+            expanded_g = g.expand(num_edges, -1) # -1 means keep the original feature size
+            edge_inputs.insert(0, expanded_g)
 
+    # Update edge features
+        edge_embedding = self.edge_block(torch.cat(edge_inputs, dim=1))
+    
+    # Aggregate edge features for node updates
+        aggregation = self.aggregate(edge_embedding, row, dim_size=x.shape[0])
+    
+    # Prepare inputs for the node block
+        node_inputs = [x, aggregation]
+        if self.global_block is not None:
+        # Also expand globals for the node update
+            num_nodes = x.shape[0]
+            expanded_g_nodes = g.expand(num_nodes, -1)
+            node_inputs.insert(0, expanded_g_nodes)
+        
+    # Update node features
+        node_embeddings = self.node_block(torch.cat(node_inputs, dim=1))
+    
+        if self.global_block is not None:
+        # Aggregate features for global update
+            edge_aggr_global = self.global_aggregate(edge_embedding, dim_size=1)
+            node_aggr_global = self.global_aggregate(node_embeddings, dim_size=1)
+
+            global_inputs = [g, node_aggr_global, edge_aggr_global]
+            global_embeddings = self.global_block(torch.cat(global_inputs, dim=1))
+        
+            return edge_embedding, node_embeddings, global_embeddings
+    
+        else:
+            return edge_embedding, node_embeddings, None
+        
+    
 
 class MP_Block(nn.Module):
     # L@L.T matrix multiplication graph layer
