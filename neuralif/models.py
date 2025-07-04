@@ -208,12 +208,42 @@ class MP_Block(nn.Module):
                            edge_features_out=edge_features_out_final) # <-- CHANGED: Output is the final calculated dim
     
     def forward(self, x, edge_index, edge_attr, global_features):
-        edge_embedding, node_embeddings, global_features = self.l1(x, edge_index, edge_attr, g=global_features)
+    # ===================================================================
+    # === FINAL DEBUG BLOCK to inspect all tensors before the crash ===
+    # ===================================================================
+        print("\n--- ENTERING MP_Block FORWARD PASS ---")
+        try:
+        # Check node features
+            print(f"Input x shape: {x.shape}, dtype: {x.dtype}, device: {x.device}")
+
+        # Check edge attributes
+            print(f"Input edge_attr shape: {edge_attr.shape}, dtype: {edge_attr.dtype}")
         
-        # flip row and column indices
+        # Check edge indices
+            print(f"Input edge_index shape: {edge_index.shape}, dtype: {edge_index.dtype}")
+            if edge_index.numel() > 0:
+                max_idx = edge_index.max().item()
+                num_nodes = x.shape[0]
+                print(f"Max index in edge_index: {max_idx}")
+                if max_idx >= num_nodes:
+                # This check is here just in case, though we suspect it's not the issue now.
+                    print(f"!!! CRITICAL: Index {max_idx} is out of bounds for {num_nodes} nodes!")
+
+            print("--- Tensors appear valid. Calling self.l1 (GraphNet)... ---")
+        except Exception as e:
+            print(f"An error occurred during debugging prints: {e}")
+
+    # ===================================================================
+    
+    # This is the call that leads to the crash
+        edge_embedding, node_embeddings, global_features = self.l1(x, edge_index, edge_attr, g=global_features)
+    
+        print("--- self.l1 (GraphNet) call SUCCEEDED ---")
+
+    # flip row and column indices
         edge_index = torch.stack([edge_index[1], edge_index[0]], dim=0)
         edge_embedding, node_embeddings, global_features = self.l2(node_embeddings, edge_index, edge_embedding, g=global_features)
-        
+    
         return edge_embedding, node_embeddings, global_features
 
 ############################
