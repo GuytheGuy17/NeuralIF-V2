@@ -172,78 +172,49 @@ class MP_Block(nn.Module):
     def __init__(self, last, edge_features_in, edge_features_hidden, node_features, global_features, hidden_size, **kwargs) -> None:
         super().__init__()
         
-        # The 'first' and 'skip_connections' arguments are no longer needed here,
-        # as their logic is now handled by the value of 'edge_features_in'.
-        
-        # first and second aggregation
+        # Determine aggregation functions
         if "aggregate" in kwargs and kwargs["aggregate"] is not None:
             aggr = kwargs["aggregate"] if len(kwargs["aggregate"]) == 2 else kwargs["aggregate"] * 2
         else:
             aggr = ["mean", "sum"]
         
-        act = kwargs["activation"] if "activation" in kwargs else "relu"
+        act = kwargs.get("activation", "relu")
         
-        # The final output of this block should be 1 if it's the last block in the sequence.
-        # Otherwise, the output dimension is the hidden dimension.
+        # Determine the final output feature size for this block
         edge_features_out_final = 1 if last else edge_features_hidden
         
-        # We use 2 graph nets in order to operate on the upper and lower triangular parts of the matrix
-        
-        # l1 maps the input features (which can vary) to the hidden dimension
-        self.l1 = GraphNet(node_features=node_features, 
-                           edge_features=edge_features_in,             # <-- CHANGED: Use the new input parameter
-                           global_features=global_features,
-                           hidden_size=hidden_size, 
-                           aggregate=aggr[0], 
-                           activation=act, 
-                           edge_features_out=edge_features_hidden)   # <-- CHANGED: Output is always the hidden dim
+        # GraphNet for the lower triangular part
+        self.l1 = GraphNet(
+            node_features=node_features, 
+            edge_features=edge_features_in,
+            global_features=global_features,
+            hidden_size=hidden_size, 
+            aggregate=aggr[0], 
+            activation=act, 
+            edge_features_out=edge_features_hidden
+        )
 
-        # l2 maps the hidden dimension to the final output dimension for this block
-        self.l2 = GraphNet(node_features=node_features, 
-                           edge_features=edge_features_hidden,       # <-- CHANGED: Input is now the hidden dim
-                           global_features=global_features,
-                           hidden_size=hidden_size, 
-                           aggregate=aggr[1], 
-                           activation=act, 
-                           edge_features_out=edge_features_out_final) # <-- CHANGED: Output is the final calculated dim
+        # GraphNet for the upper triangular part
+        self.l2 = GraphNet(
+            node_features=node_features, 
+            edge_features=edge_features_hidden,
+            global_features=global_features,
+            hidden_size=hidden_size, 
+            aggregate=aggr[1], 
+            activation=act, 
+            edge_features_out=edge_features_out_final
+        )
     
     def forward(self, x, edge_index, edge_attr, global_features):
-    # ===================================================================
-    # === FINAL DEBUG BLOCK to inspect all tensors before the crash ===
-    # ===================================================================
-        print("\n--- ENTERING MP_Block FORWARD PASS ---")
-        try:
-        # Check node features
-            print(f"Input x shape: {x.shape}, dtype: {x.dtype}, device: {x.device}")
-
-        # Check edge attributes
-            print(f"Input edge_attr shape: {edge_attr.shape}, dtype: {edge_attr.dtype}")
-        
-        # Check edge indices
-            print(f"Input edge_index shape: {edge_index.shape}, dtype: {edge_index.dtype}")
-            if edge_index.numel() > 0:
-                max_idx = edge_index.max().item()
-                num_nodes = x.shape[0]
-                print(f"Max index in edge_index: {max_idx}")
-                if max_idx >= num_nodes:
-                # This check is here just in case, though we suspect it's not the issue now.
-                    print(f"!!! CRITICAL: Index {max_idx} is out of bounds for {num_nodes} nodes!")
-
-            print("--- Tensors appear valid. Calling self.l1 (GraphNet)... ---")
-        except Exception as e:
-            print(f"An error occurred during debugging prints: {e}")
-
-    # ===================================================================
-    
-    # This is the call that leads to the crash
+        # Process the lower triangular part
         edge_embedding, node_embeddings, global_features = self.l1(x, edge_index, edge_attr, g=global_features)
-    
-        print("--- self.l1 (GraphNet) call SUCCEEDED ---")
-
-    # flip row and column indices
-        edge_index = torch.stack([edge_index[1], edge_index[0]], dim=0)
-        edge_embedding, node_embeddings, global_features = self.l2(node_embeddings, edge_index, edge_embedding, g=global_features)
-    
+        
+        # Flip edge indices to process the upper triangular part
+        edge_index_T = torch.stack([edge_index[1], edge_index[0]], dim=0)
+        
+        # Process the upper triangular part
+        edge_embedding, node_embeddings, global_features = self.l2(node_embeddings, edge_index_T, edge_embedding, g=global_features)
+        
         return edge_embedding, node_embeddings, global_features
 
 ############################
