@@ -91,33 +91,59 @@ def graph_to_matrix(data, normalize=False):
     return A, b
 
 def augment_features(data, skip_rhs=False):
-    # transform nodes to include more features
-    
+    """
+    A robust version of feature augmentation that prevents feature explosion.
+    """
+    num_nodes = data.num_nodes
+    device = data.x.device
+
+    # --- Initial Features ---
     if skip_rhs:
-        # use instead notde position as an input feature!
-        data.x = torch.arange(data.x.size()[0], device=data.x.device).unsqueeze(1)
+        # Use node indices as the base feature
+        x_features = torch.arange(num_nodes, device=device, dtype=torch.float).unsqueeze(1)
+    else:
+        x_features = data.x
     
+    # Add local degree profile features
+    data.x = x_features
     data = torch_geometric.transforms.LocalDegreeProfile()(data)
+    # At this point, data.x has shape [num_nodes, 6] (or 1 + 5)
     
-    # diagonal dominance and diagonal decay from the paper
+    # --- Structural Feature Calculation ---
     row, col = data.edge_index
-    diag = (row == col)
-    diag_elem = torch.abs(data.edge_attr[diag])
-    # remove diagonal elements by setting them to zero
-    non_diag_elem = data.edge_attr.clone()
-    non_diag_elem[diag] = 0
     
-    row_sums = aggr.SumAggregation()(torch.abs(non_diag_elem).unsqueeze(1), row)
-    alpha = diag_elem / row_sums
-    row_dominance_feature = alpha / (alpha + 1)
-    row_dominance_feature = torch.nan_to_num(row_dominance_feature, nan=1.0)
+    # Create a dense representation of the diagonal for safe lookups
+    diag_map = torch.zeros(num_nodes, device=device, dtype=torch.float)
+    is_diag = (row == col)
+    diag_indices = row[is_diag]
+    diag_values = torch.abs(data.edge_attr[is_diag])
+    diag_map.scatter_(0, diag_indices, diag_values)
     
-    # compute diagonal decay features
-    row_max = aggr.MaxAggregation()(torch.abs(non_diag_elem).unsqueeze(1), row)
-    alpha = diag_elem / row_max
-    row_decay_feature = alpha / (alpha + 1)
-    row_decay_feature = torch.nan_to_num(row_decay_feature, nan=1.0)
+    # Create a clone for off-diagonal calculations
+    non_diag_attr = data.edge_attr.clone()
+    non_diag_attr[is_diag] = 0
     
+    # Aggregate off-diagonal sums and maxes for each node
+    # Ensure input to aggregation is 2D: [num_edges, 1]
+    non_diag_attr_2d = torch.abs(non_diag_attr).unsqueeze(1)
+    
+    row_sums = aggr.SumAggregation()(non_diag_attr_2d, row, dim_size=num_nodes)
+    row_maxes = aggr.MaxAggregation()(non_diag_attr_2d, row, dim_size=num_nodes)
+
+    # --- ROBUSTNESS FIX: Perform division safely ---
+    # Ensure all tensors are explicitly [num_nodes, 1] before division to avoid broadcasting errors.
+    diag_map_2d = diag_map.unsqueeze(1)
+    
+    # Calculate diagonal dominance
+    alpha_dom = diag_map_2d / (row_sums + 1e-8)
+    row_dominance_feature = torch.nan_to_num(alpha_dom / (alpha_dom + 1), nan=1.0)
+    
+    # Calculate diagonal decay
+    alpha_decay = diag_map_2d / (row_maxes + 1e-8)
+    row_decay_feature = torch.nan_to_num(alpha_decay / (alpha_decay + 1), nan=1.0)
+    
+    # --- Final Concatenation ---
+    # `data.x` is [N, 6]. The two new features are [N, 1]. The result is [N, 8].
     data.x = torch.cat([data.x, row_dominance_feature, row_decay_feature], dim=1)
     
     return data
