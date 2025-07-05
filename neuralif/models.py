@@ -529,7 +529,7 @@ class NeuralIFWithRCM(NeuralIF):
     # 1) Compute RCM permutation
         with torch.no_grad():
             n = data.x.size(0)
-            A_csr = to_scipy_sparse_matrix(data.edge_index, data.edge_attr, (n, n)).tocsr()
+            A_csr = to_scipy_sparse_matrix(data.edge_index, data.edge_attr, n).tocsr()
             perm_np = reverse_cuthill_mckee(A_csr) # <-- Make sure you've imported this
             p = torch.as_tensor(perm_np, dtype=torch.long, device=data.x.device)
             invp = torch.empty_like(p)
