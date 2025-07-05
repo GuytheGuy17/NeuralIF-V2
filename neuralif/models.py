@@ -531,7 +531,7 @@ class NeuralIFWithRCM(NeuralIF):
             n = data.x.size(0)
             A_csr = to_scipy_sparse_matrix(data.edge_index, data.edge_attr, n).tocsr()
             perm_np = reverse_cuthill_mckee(A_csr) # <-- Make sure you've imported this
-            p = torch.as_tensor(perm_np, dtype=torch.long, device=data.x.device)
+            p = torch.as_tensor(perm_np.copy(), dtype=torch.long, device=data.x.device)
             invp = torch.empty_like(p)
             invp[p] = torch.arange(p.numel(), device=p.device)
 
