@@ -11,7 +11,7 @@ from apps.data import get_dataloader, graph_to_matrix
 from neuralif.utils import count_parameters, save_dict_to_file
 from neuralif.logger import TrainResults
 from neuralif.loss import loss
-from neuralif.models import NeuralIF, PreCondNet, LearnedLU, NeuralPCG
+from neuralif.models import NeuralIF, PreCondNet, LearnedLU, NeuralPCG, NeuralIFWithRCM
 
 # ===================================================================
 # === FINAL FIX 1: A New, Fast, and Simple `validate` function ===
@@ -71,6 +71,9 @@ def main(config):
     # Model creation
     if config["model"] == "neuralif":
         model = NeuralIF(**model_args)
+    elif config["model"] == "neuralif_rcm":
+        print("--- Using NeuralIF model with RCM permutation ---")
+        model = NeuralIFWithRCM(**model_args)
     else:
         # Add other model initializations here if needed
         raise NotImplementedError(f"Model {config['model']} not configured in this script.")
