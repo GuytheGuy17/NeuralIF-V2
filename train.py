@@ -85,7 +85,7 @@ def main(config):
     model.to(device)
     print(f"Number params in model: {count_parameters(model)}\n")
     
-    optimizer = torch.optim.AdamW(model.parameters())
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=20)
     
     train_loader = get_dataloader(dataset_name=config["dataset"], batch_size=config["batch_size"], mode="train")
@@ -196,6 +196,7 @@ def argparser():
     parser.add_argument("--load_model_path", type=str, default=None)
     parser.add_argument("--regularizer", type=float, default=0)
     parser.add_argument("--scheduler", action='store_true', default=False)
+    parser.add_argument("--learning_rate", type=float, default=1e-3, help="Initial learning rate for the AdamW optimizer.")
     
     # Model parameters
     parser.add_argument("--model", type=str, default="neuralif")
