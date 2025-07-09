@@ -49,10 +49,14 @@ def validate(model, validation_loader):
 # ===================================================================
 
 def main(config):
+    folder = None
     if config["save"]:
-        folder = "results/" + config.get("name", datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
+        # Create a unique folder for the run inside the specified save directory
+        folder_name = config.get("name", datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
+        folder = os.path.join(config["save_dir"], folder_name)
         os.makedirs(folder, exist_ok=True)
         save_dict_to_file(config, os.path.join(folder, "config.json"))
+        print(f"Results will be saved to: {os.path.abspath(folder)}")
     
     torch_geometric.seed_everything(config["seed"])
     
@@ -165,7 +169,7 @@ def main(config):
         torch.save(model.state_dict(), f"{folder}/final_model.pt")
 
 def argparser():
-    
+
     parser = argparse.ArgumentParser()
     
     parser.add_argument("--name", type=str, default=None)
@@ -204,6 +208,7 @@ def argparser():
     parser.add_argument("--edge_features", type=int, default=1)
     parser.add_argument("--graph_norm", action='store_true')
     parser.add_argument("--two_hop", action='store_true')
+    parser.add_argument("--save_dir", type=str, default="./results", help="Base directory to save results.")
     
     return parser.parse_args()
 
