@@ -98,79 +98,82 @@ def dircet_min_loss(L, A, x):
     res = L@(U@x)
     return torch.linalg.vector_norm(res, ord=2)
 
-def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3):
+def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3, preconditioner_solve_steps: int = 5):
     """
-    Perform `cg_steps` of Preconditioned CG on a random RHS, and return
-    the mean relative residual over those steps:
-        mean_i ||r_i|| / ||r_0||
-    """
-    # --- Start of Debug Version ---
-    print("\n--- [DEBUG] Entering pcg_proxy ---")
+    A scalable and robust version of the PCG proxy loss.
 
-    L_dense = L_mat.to_dense()
-    U_dense = U_mat.to_dense()
+    This function avoids dense matrix conversions by using a nested iterative
+    solver to apply the preconditioner M_inv = U_inv * L_inv.
+    """
     
+    # Inner function to solve Ax=b for a sparse A using a few steps of CG
+    def iterative_sparse_solve(A_sparse, b_vec, iterations):
+        x = torch.zeros_like(b_vec)
+        r = b_vec - A_sparse @ x
+        p = r.clone()
+        rs_old = torch.dot(r.squeeze(), r.squeeze())
+
+        for _ in range(iterations):
+            Ap = A_sparse @ p
+            alpha = rs_old / (torch.dot(p.squeeze(), Ap.squeeze()) + 1e-10)
+            x = x + alpha * p
+            r = r - alpha * Ap
+            rs_new = torch.dot(r.squeeze(), r.squeeze())
+            if torch.sqrt(rs_new) < 1e-8:
+                break
+            p = r + (rs_new / rs_old) * p
+            rs_old = rs_new
+        return x
+
+    # Main pcg_proxy logic starts here
     n = A.shape[0]
     b = torch.randn((n, 1), device=A.device, dtype=A.dtype)
     x = torch.zeros_like(b)
     r = b.clone()
-    r0_norm = torch.linalg.vector_norm(r, 2) + 1e-16
+    r0_norm = torch.linalg.vector_norm(r) + 1e-16
 
-    z = torch.linalg.solve_triangular(L_dense, r, upper=False)
-    z = torch.linalg.solve_triangular(U_dense, z, upper=True)
+    # Preconditioning step using the scalable iterative solver
+    y = iterative_sparse_solve(L_mat, r, iterations=preconditioner_solve_steps)
+    z = iterative_sparse_solve(U_mat, y, iterations=preconditioner_solve_steps)
     
-    # Check for NaNs after initial preconditioning
-    if torch.isnan(z).any():
-        print("[FATAL] NaN detected in 'z' after initial solve. Exiting.")
-        # Returning a large number instead of nan to allow training to continue if needed
-        return torch.tensor(1e6, device=A.device)
-
     p = z.clone()
-
     residuals = []
+    rz_old = (r * z).sum()
+
     for i in range(cg_steps):
-        print(f"\n[DEBUG] CG Step {i+1}")
         Ap = A @ p
-        rz_old = (r * z).sum()
-        
         pAp = (p * Ap).sum()
-        alpha = rz_old / (pAp + 1e-10)  # Avoid division by zero
         
-        print(f"[DEBUG] rz_old: {rz_old.item()}, pAp: {pAp.item()}, alpha: {alpha.item()}")
-        if torch.isnan(alpha):
-            print("[FATAL] alpha is NaN!")
-            return torch.tensor(1e6, device=A.device)
-
+        # Robustness check for alpha calculation
+        if torch.abs(pAp) < 1e-12:
+            warnings.warn(f"PCG proxy: Unstable alpha denominator. Stopping early.")
+            break
+            
+        alpha = rz_old / pAp
         x = x + alpha * p
+        r = r - alpha * Ap
         
-        if i < cg_steps - 1:
-            r_new = r - alpha * Ap
-        else: # On the last step, r_new is not needed for the next beta
-            r_new = r 
+        residuals.append(torch.linalg.vector_norm(r) / r0_norm)
         
-        residuals.append(torch.linalg.vector_norm(r_new, 2) / r0_norm)
-        
-        # Check if residual is nan before the next step
-        if torch.isnan(residuals[-1]).any():
-             print(f"[FATAL] Residual at step {i+1} is NaN!")
-             return torch.tensor(1e6, device=A.device)
-
-        r = r_new # Update r
-        
-        z = torch.linalg.solve_triangular(L_dense, r, upper=False)
-        z = torch.linalg.solve_triangular(U_dense, z, upper=True)
+        # Apply preconditioner again for the next step
+        y = iterative_sparse_solve(L_mat, r, iterations=preconditioner_solve_steps)
+        z = iterative_sparse_solve(U_mat, y, iterations=preconditioner_solve_steps)
         
         rz_new = (r * z).sum()
-        beta = rz_new / (rz_old + 1e-16)
-
-        print(f"[DEBUG] rz_new: {rz_new.item()}, beta: {beta.item()}")
-        if torch.isnan(beta):
-            print("[FATAL] beta is NaN!")
-            return torch.tensor(1e6, device=A.device)
-
+        
+        # Robustness check for beta calculation
+        if torch.abs(rz_old) < 1e-12:
+             warnings.warn(f"PCG proxy: Unstable beta denominator. Stopping early.")
+             break
+        
+        beta = rz_new / rz_old
         p = z + beta * p
+        rz_old = rz_new
 
-    print("--- [DEBUG] Exiting pcg_proxy successfully ---")
+    if not residuals:
+        # Return a neutral loss if the loop breaks on the first step
+        return torch.tensor(1.0, device=A.device)
+
     return torch.stack(residuals).mean()
 
 def improved_sketch_with_pcg(
