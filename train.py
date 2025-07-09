@@ -13,10 +13,7 @@ from neuralif.logger import TrainResults
 from neuralif.loss import loss
 from neuralif.models import NeuralIF, PreCondNet, LearnedLU, NeuralPCG, NeuralIFWithRCM
 
-# ===================================================================
-# === FINAL FIX 1: A New, Fast, and Simple `validate` function ===
-# This version will NOT get stuck.
-# ===================================================================
+
 @torch.no_grad()
 def validate(model, validation_loader):
     """
@@ -138,16 +135,12 @@ def main(config):
             
             # --- Validation check ---
             if (total_it % 1000) == 0:
-                # ========================================================
-                # === FINAL FIX 2: A new, simple validation call ===
-                # This calls our new fast `validate` function.
-                # ========================================================
                 val_loss = validate(model, validation_loader)
                 
                 if config["scheduler"]:
                     scheduler.step(val_loss)
                 
-                logger.log_val(val_loss, -1) # Logger needs to be fixed/verified separately
+                logger.log_val(val_loss, -1) 
                 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -172,8 +165,7 @@ def main(config):
         torch.save(model.state_dict(), f"{folder}/final_model.pt")
 
 def argparser():
-    # This function should remain as you had it, with the --load_model_path argument
-    # (The code for argparser is omitted here for brevity, no changes are needed from your last version)
+    
     parser = argparse.ArgumentParser()
     
     parser.add_argument("--name", type=str, default=None)

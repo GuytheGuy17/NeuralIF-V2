@@ -57,7 +57,6 @@ class ToLowerTriangular(torch_geometric.transforms.BaseTransform):
             raise NotImplementedError("Custom ordering not yet implemented...")
         
         # transform the data into lower triag graph
-        # this should be a data transformation (maybe?)
         rows, cols = data.edge_index[0], data.edge_index[1]
         fil = cols <= rows
         l_index = data.edge_index[:, fil]
@@ -127,11 +126,10 @@ class GraphNet(nn.Module):
         if self.global_block is not None:
             assert g is not None, "Need global features for global block"
         
-        # --- ROBUSTNESS FIX ---
         # Explicitly expand the global features to match the number of edges.
         # This prevents unintended broadcasting that can cause memory to explode.
             num_edges = sender_features.shape[0]
-            expanded_g = g.expand(num_edges, -1) # -1 means keep the original feature size
+            expanded_g = g.expand(num_edges, -1) 
             edge_inputs.insert(0, expanded_g)
 
     # Update edge features
@@ -341,8 +339,7 @@ class PreCondNet(nn.Module):
         edge_embedding = data.edge_attr
         node_embedding = data.x
         edge_index = data.edge_index
-        
-        # copy the input data (only edges of original matrix A) for skip connections
+        # add remaining self loops
         a_edges = edge_embedding.clone()
         
         # compute the output of the network
@@ -419,15 +416,15 @@ class NeuralIF(nn.Module):
         self.mps = torch.nn.ModuleList()
         for l in range(message_passing_steps):
     # Determine the input edge dimension for the current block
-    # The first block takes 1 feature. Subsequent blocks take `edge_features` + 1 (from skip connection)
+    # The first block takes 1 feature. 
             input_edge_features = 1 if l == 0 else edge_features + 1
 
             self.mps.append(MP_Block(
-                skip_connections=self.skip_connections, # This is now just a flag
+                skip_connections=self.skip_connections, 
                 first=l==0,
                 last=l==(message_passing_steps-1),
-                edge_features_in=input_edge_features, # Pass the calculated input dimension
-                edge_features_hidden=edge_features, # The desired output/hidden dimension
+                edge_features_in=input_edge_features, 
+                edge_features_hidden=edge_features,
                 node_features=num_node_features,
                 global_features=self.global_features,
                 hidden_size=self.latent_size,
@@ -442,7 +439,6 @@ class NeuralIF(nn.Module):
         self.tau = drop_tol
         self.two = kwargs.get("two_hop", False)
         
-    # In your model script, inside class NeuralIF
 
     def forward(self, data):
         if self.augment_node_features:
@@ -477,7 +473,7 @@ class NeuralIF(nn.Module):
             edge_embedding, node_embedding, global_features = layer(node_embedding, l_index, edge_embedding, global_features)
     
         return self.transform_output_matrix(node_embedding, l_index, edge_embedding, a_edges)
-# In NeuralIF
+    
     def transform_output_matrix(self, node_x, edge_index, edge_values, a_edges):
     # Clone the tensor to avoid in-place modification and to save the original output
         output_edge_values = edge_values.clone()
@@ -485,8 +481,7 @@ class NeuralIF(nn.Module):
         diag = edge_index[0] == edge_index[1]
     
         if self.normalize_diag:
-        # (This part of the code also needs to be checked to ensure it
-        #  doesn't modify tensors in-place if it's used)
+            # Ensure the diagonal is positive and normalized
             if a_edges.dim() > 1:
                 a_edges = a_edges.squeeze() # Ensure a_edges is 1D for this part
             a_diag = a_edges[diag]
@@ -497,25 +492,21 @@ class NeuralIF(nn.Module):
         # This line creates a new tensor, so it is safe.
             output_edge_values = torch.sqrt(a_diag[edge_index[0]]) * output_edge_values / torch.sqrt(aggregated[edge_index[0]])
         else:
-        # Modify the CLONED tensor, not the original
             predicted_diag = torch.sqrt(torch.exp(output_edge_values[diag]))
             output_edge_values[diag] = predicted_diag + 1e-4
 
     
         node_output = self.node_decoder(node_x).squeeze() if self.node_decoder is not None else None
     
-    # --- Logic for inference vs training ---
         if torch.is_inference_mode_enabled():
-        # ... (Inference logic uses the modified output_edge_values)
             m = torch.sparse_coo_tensor(edge_index, output_edge_values.squeeze(),
                                      size=(node_x.size()[0], node_x.size()[0]))
             return m, m.T, node_output
         else:
-        # Create the sparse tensor for the loss function using the MODIFIED values
             t = torch.sparse_coo_tensor(edge_index, output_edge_values.squeeze(),
                                      size=(node_x.size()[0], node_x.size()[0]))
         
-        # Calculate the L1 penalty on the ORIGINAL, unmodified network output
+        # Calculate the L1 penalty
             l1_penalty = torch.sum(torch.abs(edge_values)) / len(edge_values)
         
             return t, l1_penalty, node_output
@@ -526,39 +517,36 @@ class NeuralIFWithRCM(NeuralIF):
     baked into the forward pass.
     """
     def forward(self, data):
-    # 1) Compute RCM permutation
+    # Compute RCM permutation
         with torch.no_grad():
             n = data.x.size(0)
             A_csr = to_scipy_sparse_matrix(data.edge_index, data.edge_attr, n).tocsr()
-            perm_np = reverse_cuthill_mckee(A_csr) # <-- Make sure you've imported this
+            perm_np = reverse_cuthill_mckee(A_csr) 
             p = torch.as_tensor(perm_np.copy(), dtype=torch.long, device=data.x.device)
             invp = torch.empty_like(p)
             invp[p] = torch.arange(p.numel(), device=p.device)
 
-    # 2) Permute the graph data object
+    # Permute the graph data object
         data.x = data.x[p]
         if hasattr(data, 'batch'):
             data.batch = data.batch[p]
         data.edge_index = invp[data.edge_index]
 
-    # 3) Call the base NeuralIF.forward on the reordered graph
+    #  Call the base NeuralIF.forward on the reordered graph
         out1, out2, node_out = super().forward(data)
 
-    # 4) Invert permutation on outputs to return them to the original ordering
+    # Invert permutation on outputs to return them to the original ordering
         def invert_tensor(M):
             if isinstance(M, torch.Tensor) and M.is_sparse:
             # For sparse tensors, permute the indices
                 idx, vals = M.coalesce().indices(), M.coalesce().values()
-                new_idx = p[idx] # Apply original permutation 'p' to bring back
+                new_idx = p[idx] 
                 return torch.sparse_coo_tensor(new_idx, vals, M.shape, device=M.device)
             elif isinstance(M, torch.Tensor) and node_out is not None:
-                # This case is tricky, for dense tensors or node_out, use the inverse perm
-                # For now we focus on the sparse case which is the primary output
-                pass # Add your specific logic if needed
-            return M # Return scalars or None as is
+                pass 
+            return M
 
         L = invert_tensor(out1)
-    # The second output can be a tensor (U) or a scalar (regularizer)
         U_or_reg = invert_tensor(out2) if isinstance(out2, torch.Tensor) else out2
     
     # The node_out tensor should be permuted back using the inverse permutation
