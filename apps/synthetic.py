@@ -93,7 +93,9 @@ def main(args):
         # Use the imported function to convert the matrix to a PyG Data object
         graph_data = matrix_to_graph(matrix, b)
         
-        save_path = os.path.join(args.output_dir, f'graph_{i}.pt')
+        grid_size = args.grid_size if args.type == 'fem' else args.matrix_size
+        save_path = os.path.join(args.output_dir, f'graph_size{grid_size}_sample{i}.pt')
+        
         torch.save(graph_data, save_path)
         
         if (i + 1) % 100 == 0 or (i + 1) == args.num_samples:
