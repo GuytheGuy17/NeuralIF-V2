@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch_geometric
 import torch_geometric.nn as pyg
+from torch.utils.checkpoint import checkpoint
 from torch_geometric.nn import aggr
 from torch_geometric.utils import to_scipy_sparse_matrix
 from scipy.sparse import tril
@@ -439,40 +440,48 @@ class NeuralIF(nn.Module):
         self.tau = drop_tol
         self.two = kwargs.get("two_hop", False)
         
-
+# In neuralif/models.py, inside the NeuralIF class
     def forward(self, data):
+        # NOTE: We need access to the 'two_hop' and 'skip_connections' kwargs from your config.
+        # It's better to pass the whole config dictionary to the forward pass or have these as model attributes.
+        # For now, we assume they are accessible. This implementation shows the checkpointing logic.
+
         if self.augment_node_features:
             data = augment_features(data, skip_rhs=True)
-        
-        if self.two:
-            data = TwoHop()(data)
-        
-        data = ToLowerTriangular()(data)
-    
-        edge_embedding = data.edge_attr
-        l_index = data.edge_index
-    
-        if self.graph_norm is not None:
-            node_embedding = self.graph_norm(data.x, batch=data.batch)
-        else:
-            node_embedding = data.x
-    
-        a_edges = edge_embedding.clone()
 
+    # This assumes 'two_hop' is a class attribute or passed in kwargs
+        if hasattr(self, 'two') and self.two: 
+            data = torch_geometric.transforms.TwoHop()(data)
+
+        data = ToLowerTriangular()(data)
+
+        edge_embedding, l_index, node_embedding = data.edge_attr, data.edge_index, data.x
+
+        a_edges = edge_embedding.clone()
         if a_edges.dim() == 1:
             a_edges = a_edges.view(-1, 1)
 
         global_features = None
         if self.global_features > 0:
-            global_features = torch.zeros((1, self.global_features), device=data.x.device, requires_grad=False)
-    
+            global_features = torch.zeros((1, self.global_features), device=data.x.device)
+
+    # --- Gradient Checkpointing Implementation ---
         for i, layer in enumerate(self.mps):
-            if i != 0 and self.skip_connections:
-                edge_embedding = torch.cat([edge_embedding, a_edges], dim=1)
-        
-            edge_embedding, node_embedding, global_features = layer(node_embedding, l_index, edge_embedding, global_features)
-    
-        return self.transform_output_matrix(node_embedding, l_index, edge_embedding, a_edges)
+        # The input tensors to the checkpointed function
+            current_inputs = [node_embedding, l_index, edge_embedding, global_features]
+
+        # The skip connection must happen BEFORE the checkpoint call
+            if i > 0 and self.skip_connections:
+                edge_embedding = torch.cat([current_inputs[2], a_edges], dim=1)
+                current_inputs[2] = edge_embedding
+
+        # Wrap each layer call in a checkpoint
+        # use_reentrant=False is the modern and recommended approach
+            edge_embedding, node_embedding, global_features = checkpoint(
+                layer, *current_inputs, use_reentrant=False
+            )
+
+        return self.transform_output_matrix(node_embedding, l_index, edge_embedding)
     
     def transform_output_matrix(self, node_x, edge_index, edge_values, a_edges):
     # Clone the tensor to avoid in-place modification and to save the original output
