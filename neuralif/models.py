@@ -481,7 +481,7 @@ class NeuralIF(nn.Module):
                 layer, *current_inputs, use_reentrant=False
             )
 
-        return self.transform_output_matrix(node_embedding, l_index, edge_embedding)
+        return self.transform_output_matrix(node_embedding, l_index, edge_embedding, a_edges)
     
     def transform_output_matrix(self, node_x, edge_index, edge_values, a_edges):
     # Clone the tensor to avoid in-place modification and to save the original output
