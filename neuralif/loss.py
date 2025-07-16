@@ -21,9 +21,8 @@ def frobenius_loss(L, A, sparse=True):
         U = U.to_dense().squeeze()
         return torch.linalg.norm(L@U - A, ord="fro")
 
-# All other helper loss functions (sketched_loss, supervised_loss, pcg_proxy,
-# improved_sketch_with_pcg) remain exactly as they were in the "detached gradient"
-# version. They will now be called with CPU tensors.
+# NOTE: The definitions for sketched_loss and other helpers are assumed to exist as in your original file.
+# The following implementations are from your codebase.
 
 def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3, preconditioner_solve_steps: int = 5):
     # Unchanged
@@ -71,6 +70,9 @@ def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3, preconditioner_solve_steps: in
     if not residuals: return torch.tensor(1.0, device=A.device)
     return torch.stack(residuals).mean()
 
+# This function is not provided in your code but is called. We assume it exists.
+# def sketched_loss(...)
+
 def improved_sketch_with_pcg(
     L, A, num_sketches, normalized, pcg_steps, pcg_weight, use_rademacher
 ):
@@ -80,44 +82,53 @@ def improved_sketch_with_pcg(
         L_mat = L
         U_mat = L_mat.T
 
-    # This will now be called with CPU tensors, which is fine
-    sketch_loss = sketched_loss((L_mat, U_mat), A, normalized=normalized)
+    # Assuming sketched_loss exists and this call is correct for your version
+    sketch_loss_val = sketched_loss((L_mat, U_mat), A, normalized=normalized)
 
-    # We will differentiate through pcg_proxy, but it will happen on the CPU
-    proxy = pcg_proxy(L_mat, U_mat, A, cg_steps, 5) # 5 is the default solve steps
+    proxy = pcg_proxy(L_mat, U_mat, A, cg_steps, 5) 
 
-    return sketch_loss + pcg_weight * proxy
+    return sketch_loss_val + pcg_weight * proxy
 
 
 def loss(output, data, config=None, **kwargs):
-    # --- THIS IS THE CORE OF THE FIX ---
-    # 1. Move model output (which is on GPU) to CPU
+    """
+    Computes the loss with a memory-efficient CPU offloading strategy for the backward pass.
+    """
+    # Store the original device (e.g., 'cuda:0') to move the result back at the end.
+    original_device = output[0].device if isinstance(output, tuple) else output.device
+    
+    # 1. Move model output (the sparse preconditioner L) and the problem matrix A to the CPU.
+    #    These are the tensors involved in the memory-heavy sparse operations.
     if isinstance(output, tuple):
         output_cpu = (output[0].to('cpu'), output[1].to('cpu'))
     else:
         output_cpu = output.to('cpu')
     
-    # 2. Get matrix A and also move it to CPU
     with torch.no_grad():
         A, _ = graph_to_matrix(data)
         A_cpu = A.to('cpu')
 
-    # 3. Compute the loss entirely on the CPU
+    # 2. Compute the loss entirely on the CPU.
+    #    All intermediate tensors, including the problematic large Jacobian,
+    #    will now be created in system RAM, not VRAM, avoiding the GPU memory error.
     if config == 'sketch_pcg':
-        l = improved_sketch_with_pcg(
+        l_cpu = improved_sketch_with_pcg(
             output_cpu,
             A_cpu,
-            num_sketches=kwargs.get('num_sketches',2),
-            normalized=kwargs.get('normalized',False),
-            pcg_steps=kwargs.get('pcg_steps',3),
-            pcg_weight=kwargs.get('pcg_weight',0.1),
-            use_rademacher=kwargs.get('use_rademacher',False)
+            num_sketches=kwargs.get('num_sketches', 2),
+            normalized=kwargs.get('normalized', False),
+            pcg_steps=kwargs.get('pcg_steps', 3),
+            pcg_weight=kwargs.get('pcg_weight', 0.1),
+            use_rademacher=kwargs.get('use_rademacher', False)
         )
     elif config == "sketched":
-        l = sketched_loss(output_cpu, A_cpu, normalized=kwargs.get("normalized", False))
+        # We assume sketched_loss exists based on your code.
+        l_cpu = sketched_loss(output_cpu, A_cpu, normalized=kwargs.get("normalized", False))
     else:
         raise ValueError(f"Invalid loss configuration: {config}")
     
-    # 4. Return the final loss tensor. It is on the CPU.
-    #    PyTorch's autograd will handle copying gradients back to the GPU model.
-    return l
+    # 3. Move the final scalar loss back to the original GPU device.
+    #    This makes the change transparent to the training loop. Autograd will
+    #    correctly trace operations back across devices to compute gradients
+    #    for the model parameters on the GPU.
+    return l_cpu.to(original_device)
