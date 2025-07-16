@@ -473,6 +473,8 @@ class NeuralIF(nn.Module):
     
         return self.transform_output_matrix(node_embedding, l_index, edge_embedding, a_edges)
     
+    # In neuralif/models.py, inside the NeuralIF class
+
     def transform_output_matrix(self, node_x, edge_index, edge_values, a_edges):
         # Clone the tensor to avoid in-place modification and to save the original output
         output_edge_values = edge_values.clone()
@@ -493,14 +495,14 @@ class NeuralIF(nn.Module):
         else:
             predicted_diag = torch.sqrt(torch.exp(output_edge_values[diag]))
             
-            # --- THIS IS THE FIX ---
-            # Original problematic line:
-            # output_edge_values[diag] = predicted_diag + 1e-4
-            
-            # Corrected line:
-            # Create the small constant with the same dtype and device as the target tensor.
             epsilon = torch.tensor(1e-4, dtype=predicted_diag.dtype, device=predicted_diag.device)
-            output_edge_values[diag] = predicted_diag + epsilon
+            
+            # --- THE DEFINITIVE FIX ---
+            # Create the source value
+            source_value = predicted_diag + epsilon
+            
+            # Explicitly cast the source value to match the destination's dtype before assignment
+            output_edge_values[diag] = source_value.to(output_edge_values.dtype)
             # --- END OF FIX ---
 
     
@@ -518,7 +520,7 @@ class NeuralIF(nn.Module):
             l1_penalty = torch.sum(torch.abs(edge_values)) / len(edge_values)
         
             return t, l1_penalty, node_output
-
+    
 class NeuralIFWithRCM(NeuralIF):
     """
     Extends NeuralIF with a one-shot Reverse Cuthill-McKee permutation
