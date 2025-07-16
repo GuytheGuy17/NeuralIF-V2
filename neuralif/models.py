@@ -440,8 +440,6 @@ class NeuralIF(nn.Module):
         self.tau = drop_tol
         self.two = kwargs.get("two_hop", False)
         
-# In neuralif/models.py, inside the NeuralIF class
-        # In your neuralif/models.py file, inside the NeuralIF class
 
     def forward(self, data):
         if self.augment_node_features:
@@ -474,8 +472,9 @@ class NeuralIF(nn.Module):
             )
     
         return self.transform_output_matrix(node_embedding, l_index, edge_embedding, a_edges)
+    
     def transform_output_matrix(self, node_x, edge_index, edge_values, a_edges):
-    # Clone the tensor to avoid in-place modification and to save the original output
+        # Clone the tensor to avoid in-place modification and to save the original output
         output_edge_values = edge_values.clone()
     
         diag = edge_index[0] == edge_index[1]
@@ -489,11 +488,20 @@ class NeuralIF(nn.Module):
             square_values = torch.pow(output_edge_values, 2)
             aggregated = self.diag_aggregate(square_values, edge_index[0])
         
-        # This line creates a new tensor, so it is safe.
+            # This line creates a new tensor, so it is safe.
             output_edge_values = torch.sqrt(a_diag[edge_index[0]]) * output_edge_values / torch.sqrt(aggregated[edge_index[0]])
         else:
             predicted_diag = torch.sqrt(torch.exp(output_edge_values[diag]))
-            output_edge_values[diag] = predicted_diag + 1e-4
+            
+            # --- THIS IS THE FIX ---
+            # Original problematic line:
+            # output_edge_values[diag] = predicted_diag + 1e-4
+            
+            # Corrected line:
+            # Create the small constant with the same dtype and device as the target tensor.
+            epsilon = torch.tensor(1e-4, dtype=predicted_diag.dtype, device=predicted_diag.device)
+            output_edge_values[diag] = predicted_diag + epsilon
+            # --- END OF FIX ---
 
     
         node_output = self.node_decoder(node_x).squeeze() if self.node_decoder is not None else None
@@ -506,7 +514,7 @@ class NeuralIF(nn.Module):
             t = torch.sparse_coo_tensor(edge_index, output_edge_values.squeeze(),
                                      size=(node_x.size()[0], node_x.size()[0]))
         
-        # Calculate the L1 penalty
+            # Calculate the L1 penalty
             l1_penalty = torch.sum(torch.abs(edge_values)) / len(edge_values)
         
             return t, l1_penalty, node_output
