@@ -6,7 +6,10 @@ import pprint
 import torch
 import torch_geometric
 import time
-from torch.utils.checkpoint import checkpoint
+
+# --- MODIFICATION 1: Import autocast and GradScaler ---
+from torch.cuda.amp import autocast, GradScaler
+
 from apps.data import get_dataloader, graph_to_matrix
 from neuralif.utils import count_parameters, save_dict_to_file
 from neuralif.logger import TrainResults
@@ -29,15 +32,17 @@ def validate(model, validation_loader):
     for data in validation_loader:
         data = data.to(device)
         
-        output, _, _ = model(data)
-        
-        # Prepare the model output tuple (L, L.T) for the loss function
-        if isinstance(model, NeuralIF) or \
-           (isinstance(model, torch.nn.DataParallel) and isinstance(model.module, NeuralIF)):
-            output = (output, output.T)
+        # --- MODIFICATION 2: Add autocast to validation for speed and consistency ---
+        with autocast(enabled=(device.type == 'cuda')):
+            output, _, _ = model(data)
+            
+            # Prepare the model output tuple (L, L.T) for the loss function
+            if isinstance(model, NeuralIF) or \
+               (isinstance(model, torch.nn.DataParallel) and isinstance(model.module, NeuralIF)):
+                output = (output, output.T)
 
-        # Explicitly use the fast 'sketched' loss
-        l = loss(output, data, config='sketched')
+            # Explicitly use the fast 'sketched' loss
+            l = loss(output, data, config='sketched')
         
         total_loss += l.item()
         num_samples += 1
@@ -100,6 +105,10 @@ def main(config):
     logger = TrainResults(folder)
     best_val_loss = float('inf')
     total_it = 0
+
+    # --- MODIFICATION 3: Initialize the GradScaler ---
+    # The `enabled` flag makes this robust: it will only be active on CUDA devices.
+    scaler = GradScaler(enabled=(device.type == 'cuda'))
     
     for epoch in range(config["num_epochs"]):
         model.train()
@@ -110,31 +119,47 @@ def main(config):
             total_it += 1
             data = data.to(device)
             
-            output, reg, _ = model(data)
+            # --- MODIFICATION 4: Use autocast for the forward pass ---
+            with autocast(enabled=(device.type == 'cuda')):
+                output, reg, _ = model(data)
 
-            if config["model"] == "neuralif":
-                output = (output, output.T)
+                if config["model"] == "neuralif":
+                    output = (output, output.T)
 
-            l = loss(
-                output, data,
-                config=config["loss"],
-                num_sketches=config["num_sketches"],
-                pcg_steps=config["pcg_steps"],
-                pcg_weight=config["pcg_weight"],
-                normalized=config["normalized"],
-                use_rademacher=config["use_rademacher"],
-            )
+                l = loss(
+                    output, data,
+                    config=config["loss"],
+                    num_sketches=config["num_sketches"],
+                    pcg_steps=config["pcg_steps"],
+                    pcg_weight=config["pcg_weight"],
+                    normalized=config["normalized"],
+                    use_rademacher=config["use_rademacher"],
+                )
+                
+                if reg is not None and config.get("regularizer", 0) > 0:
+                    l = l + config["regularizer"] * reg
             
-            if reg is not None and config.get("regularizer", 0) > 0:
-                l = l + config["regularizer"] * reg
-            
-            l.backward()
-            
+            # --- MODIFICATION 5: Replace the backward/step/zero_grad block ---
+            # Original block:
+            # l.backward()
+            # if config.get("gradient_clipping"):
+            #     torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clipping"])
+            # optimizer.step()
+            # optimizer.zero_grad()
+
+            # New AMP-compatible block:
+            scaler.scale(l).backward()
+
+            # Optional: Unscale gradients before clipping
             if config.get("gradient_clipping"):
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clipping"])
-            
-            optimizer.step()
+
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
+            # --- End of Modification 5 ---
+            
             running_loss += l.item()
             
             # --- Validation check ---
