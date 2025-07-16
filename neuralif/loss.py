@@ -169,7 +169,7 @@ def improved_sketch_with_pcg(
     # We compute the forward pass of the pcg_proxy to get its value,
     # but we immediately detach it from the computation graph by using a no_grad context.
     with torch.no_grad():
-        proxy_val = pcg_proxy(L_mat, U_mat, A, cg_steps)
+        proxy_val = pcg_proxy(L_mat, U_mat, A, pcg_steps)
     
     # The total loss is the sketch loss plus the *value* of the proxy.
     # The gradient of the proxy term with respect to the model parameters is now zero.
