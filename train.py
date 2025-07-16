@@ -6,7 +6,7 @@ import pprint
 import torch
 import torch_geometric
 import time
-
+from torch.utils.checkpoint import checkpoint
 from apps.data import get_dataloader, graph_to_matrix
 from neuralif.utils import count_parameters, save_dict_to_file
 from neuralif.logger import TrainResults
