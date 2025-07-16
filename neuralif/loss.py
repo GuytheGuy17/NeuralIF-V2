@@ -206,7 +206,7 @@ def improved_sketch_with_pcg(
     # The pcg_proxy now has a memory-safe backward pass.
     # The number of preconditioner solve steps is passed through here.
     preconditioner_solve_steps = 5 # Or get from kwargs if you add it to the argparser
-    proxy = pcg_proxy(L_mat, U_mat, A, cg_steps, preconditioner_solve_steps)
+    proxy = pcg_proxy(L_mat, U_mat, A, pcg_steps, preconditioner_solve_steps)
 
     return sketch_loss + pcg_weight * proxy
 
