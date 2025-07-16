@@ -7,8 +7,8 @@ import torch
 import torch_geometric
 import time
 
-# Import autocast and GradScaler
-from torch.cuda.amp import autocast, GradScaler
+# AMP imports are no longer needed
+# from torch.cuda.amp import autocast, GradScaler
 
 from apps.data import get_dataloader, graph_to_matrix
 from neuralif.utils import count_parameters, save_dict_to_file
@@ -19,40 +19,20 @@ from neuralif.models import NeuralIF, PreCondNet, LearnedLU, NeuralPCG, NeuralIF
 
 @torch.no_grad()
 def validate(model, validation_loader):
-    """
-    A fast and stable validation function that uses a 'sketched' loss
-    to evaluate model performance without getting stuck on large graphs.
-    """
+    # This function is simplified back to its original form
     model.eval()
-    
     total_loss = 0.0
     num_samples = 0
-    device = next(model.parameters()).device # Get device from model
-
+    device = next(model.parameters()).device
     for data in validation_loader:
         data = data.to(device)
-        
-        # Use autocast in validation for speed and consistency
-        with autocast(enabled=(device.type == 'cuda')):
-            output, _, _ = model(data)
-            
-            # Since the loss function now expects float32, we cast the output
-            # for the validation loss calculation as well.
-            if isinstance(output, tuple):
-                output = (output[0].to(torch.float32), output[1].to(torch.float32))
-            else:
-                output = output.to(torch.float32)
-
-            if isinstance(model, NeuralIF) or \
-               (isinstance(model, torch.nn.DataParallel) and isinstance(model.module, NeuralIF)):
-                output = (output, output.T)
-
-            # Explicitly use the fast 'sketched' loss
-            l = loss(output, data, config='sketched')
-        
+        output, _, _ = model(data)
+        if isinstance(model, NeuralIF) or \
+           (isinstance(model, torch.nn.DataParallel) and isinstance(model.module, NeuralIF)):
+            output = (output, output.T)
+        l = loss(output, data, config='sketched')
         total_loss += l.item()
         num_samples += 1
-            
     avg_loss = total_loss / num_samples
     print(f"\nValidation Loss: {avg_loss:.4f}")
     return avg_loss
@@ -60,9 +40,9 @@ def validate(model, validation_loader):
 # ===================================================================
 
 def main(config):
+    # All setup code remains the same...
     folder = None
     if config["save"]:
-        # Create a unique folder for the run inside the specified save directory
         folder_name = config.get("name", datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
         folder = os.path.join(config["save_dir"], folder_name)
         os.makedirs(folder, exist_ok=True)
@@ -70,28 +50,18 @@ def main(config):
         print(f"Results will be saved to: {os.path.abspath(folder)}")
     
     torch_geometric.seed_everything(config["seed"])
-    
     device = torch.device(f"cuda:{config['device']}" if torch.cuda.is_available() and config.get("device") is not None else "cpu")
     print(f"Using device: {device}")
+    model_args = {k: config[k] for k in ["latent_size", "message_passing_steps", "skip_connections", "augment_nodes", "global_features", "decode_nodes", "normalize_diag", "activation", "aggregate", "graph_norm", "two_hop", "edge_features"] if k in config}
     
-    model_args = {k: config[k] for k in ["latent_size", "message_passing_steps", "skip_connections",
-                                         "augment_nodes", "global_features", "decode_nodes",
-                                         "normalize_diag", "activation", "aggregate", "graph_norm",
-                                         "two_hop", "edge_features"]
-                  if k in config}
-    
-    # Model creation
     if config["model"] == "neuralif":
         model = NeuralIF(**model_args)
     elif config["model"] == "neuralif_rcm":
-        print("--- Using NeuralIF model with RCM permutation ---")
         model = NeuralIFWithRCM(**model_args)
     else:
-        # Add other model initializations here if needed
         raise NotImplementedError(f"Model {config['model']} not configured in this script.")
     
     if config["load_model_path"]:
-        print(f"Loading model weights from: {config['load_model_path']}")
         model.load_state_dict(torch.load(config['load_model_path'], map_location=device))
     
     model.to(device)
@@ -107,10 +77,9 @@ def main(config):
     logger = TrainResults(folder)
     best_val_loss = float('inf')
     total_it = 0
-
-    # Initialize the GradScaler, enabled only for CUDA devices
-    scaler = GradScaler(enabled=(device.type == 'cuda'))
     
+    # AMP Scaler is removed.
+
     for epoch in range(config["num_epochs"]):
         model.train()
         running_loss = 0.0
@@ -119,26 +88,15 @@ def main(config):
         for it, data in enumerate(train_loader):
             total_it += 1
             data = data.to(device)
-            # Use set_to_none=True for a small performance gain
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
 
-            # 1. Run the model's forward pass INSIDE the autocast context
-            with autocast(enabled=(device.type == 'cuda')):
-                output, reg, _ = model(data)
-
-            # 2. Manually cast the model's output to float32 before the loss function.
-            if isinstance(output, tuple):
-                output = (output[0].to(torch.float32), output[1].to(torch.float32))
-            else:
-                output = output.to(torch.float32)
-            
-            if isinstance(reg, torch.Tensor):
-                reg = reg.to(torch.float32)
+            # Run model on GPU as normal
+            output, reg, _ = model(data)
 
             if config["model"] == "neuralif":
                 output = (output, output.T)
-
-            # 3. Compute the loss OUTSIDE the autocast context
+            
+            # Compute loss. The `loss` function will handle moving data to the CPU.
             l = loss(
                 output, data,
                 config=config["loss"],
@@ -152,33 +110,24 @@ def main(config):
             if reg is not None and config.get("regularizer", 0) > 0:
                 l = l + config["regularizer"] * reg
             
-            # 4. The backward pass still uses the scaler to manage float16 gradients
-            scaler.scale(l).backward()
-            
+            # Standard backward and step, with no scaler.
+            l.backward()
             if config.get("gradient_clipping"):
-                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clipping"])
+            optimizer.step()
 
-            scaler.step(optimizer)
-            scaler.update()
-            
             running_loss += l.item()
             
-            # --- Validation check ---
             if (total_it % 1000) == 0:
                 val_loss = validate(model, validation_loader)
-                
                 if config["scheduler"]:
                     scheduler.step(val_loss)
-                
                 logger.log_val(val_loss, -1) 
-                
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     print(f"New best validation loss: {best_val_loss:.4f}. Saving model.")
                     if config["save"]:
                         torch.save(model.state_dict(), f"{folder}/best_model.pt")
-                
                 model.train()
         
         epoch_time = time.perf_counter() - start_epoch
@@ -195,10 +144,10 @@ def main(config):
         logger.save_results()
         torch.save(model.state_dict(), f"{folder}/final_model.pt")
 
-def argparser():
 
+def argparser():
+    # The argparser function remains exactly the same as the last correct version
     parser = argparse.ArgumentParser()
-    
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--device", type=int, required=False)
     parser.add_argument("--save", action='store_true')
@@ -232,7 +181,6 @@ def argparser():
     parser.add_argument("--graph_norm", action='store_true')
     parser.add_argument("--two_hop", action='store_true')
     parser.add_argument("--save_dir", type=str, default="./results", help="Base directory to save results.")
-    
     return parser.parse_args()
 
 
