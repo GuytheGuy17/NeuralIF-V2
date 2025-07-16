@@ -122,26 +122,19 @@ def main(config):
             # Use set_to_none=True for a small performance gain
             optimizer.zero_grad(set_to_none=True)
 
-            # --- START OF THE FIX ---
             # 1. Run the model's forward pass INSIDE the autocast context
-            # This is where the main AMP benefits for the model itself are realized.
             with autocast(enabled=(device.type == 'cuda')):
                 output, reg, _ = model(data)
 
             # 2. Manually cast the model's output to float32 before the loss function.
-            # This ensures that the loss function, which has operations not supported
-            # in float16 for sparse tensors, receives float32 inputs and runs safely.
             if isinstance(output, tuple):
-                # Handles the case where the model returns (L, U)
                 output = (output[0].to(torch.float32), output[1].to(torch.float32))
             else:
                 output = output.to(torch.float32)
             
-            # The regularization term might also be a tensor from the model
             if isinstance(reg, torch.Tensor):
                 reg = reg.to(torch.float32)
 
-            # Prepare the model output tuple (L, L.T) for the loss function if needed
             if config["model"] == "neuralif":
                 output = (output, output.T)
 
@@ -159,12 +152,9 @@ def main(config):
             if reg is not None and config.get("regularizer", 0) > 0:
                 l = l + config["regularizer"] * reg
             
-            # --- END OF THE FIX ---
-            
             # 4. The backward pass still uses the scaler to manage float16 gradients
             scaler.scale(l).backward()
             
-            # Optional: Unscale gradients before clipping, as is standard practice
             if config.get("gradient_clipping"):
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clipping"])
@@ -189,7 +179,7 @@ def main(config):
                     if config["save"]:
                         torch.save(model.state_dict(), f"{folder}/best_model.pt")
                 
-                model.train() # Set model back to training mode
+                model.train()
         
         epoch_time = time.perf_counter() - start_epoch
         avg_epoch_loss = running_loss / len(train_loader)
@@ -209,7 +199,6 @@ def argparser():
 
     parser = argparse.ArgumentParser()
     
-    # ... (the argparser function remains exactly the same) ...
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--device", type=int, required=False)
     parser.add_argument("--save", action='store_true')
