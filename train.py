@@ -7,7 +7,7 @@ import torch
 import torch_geometric
 import time
 
-# --- MODIFICATION 1: Import autocast and GradScaler ---
+# Import autocast and GradScaler
 from torch.cuda.amp import autocast, GradScaler
 
 from apps.data import get_dataloader, graph_to_matrix
@@ -32,11 +32,17 @@ def validate(model, validation_loader):
     for data in validation_loader:
         data = data.to(device)
         
-        # --- MODIFICATION 2: Add autocast to validation for speed and consistency ---
+        # Use autocast in validation for speed and consistency
         with autocast(enabled=(device.type == 'cuda')):
             output, _, _ = model(data)
             
-            # Prepare the model output tuple (L, L.T) for the loss function
+            # Since the loss function now expects float32, we cast the output
+            # for the validation loss calculation as well.
+            if isinstance(output, tuple):
+                output = (output[0].to(torch.float32), output[1].to(torch.float32))
+            else:
+                output = output.to(torch.float32)
+
             if isinstance(model, NeuralIF) or \
                (isinstance(model, torch.nn.DataParallel) and isinstance(model.module, NeuralIF)):
                 output = (output, output.T)
@@ -95,19 +101,14 @@ def main(config):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=20)
     
     train_loader = get_dataloader(dataset_name=config["dataset"], batch_size=config["batch_size"], mode="train")
-    # This line robustly determines the correct path for the validation set.
     validation_path = config["validation_dataset"] if config["validation_dataset"] else config["dataset"]
-
-    validation_loader = get_dataloader(dataset_name=validation_path,
-                                       batch_size=1,
-                                       mode="val")
+    validation_loader = get_dataloader(dataset_name=validation_path, batch_size=1, mode="val")
     
     logger = TrainResults(folder)
     best_val_loss = float('inf')
     total_it = 0
 
-    # --- MODIFICATION 3: Initialize the GradScaler ---
-    # The `enabled` flag makes this robust: it will only be active on CUDA devices.
+    # Initialize the GradScaler, enabled only for CUDA devices
     scaler = GradScaler(enabled=(device.type == 'cuda'))
     
     for epoch in range(config["num_epochs"]):
@@ -118,47 +119,58 @@ def main(config):
         for it, data in enumerate(train_loader):
             total_it += 1
             data = data.to(device)
-            
-            # --- MODIFICATION 4: Use autocast for the forward pass ---
+            # Use set_to_none=True for a small performance gain
+            optimizer.zero_grad(set_to_none=True)
+
+            # --- START OF THE FIX ---
+            # 1. Run the model's forward pass INSIDE the autocast context
+            # This is where the main AMP benefits for the model itself are realized.
             with autocast(enabled=(device.type == 'cuda')):
                 output, reg, _ = model(data)
 
-                if config["model"] == "neuralif":
-                    output = (output, output.T)
-
-                l = loss(
-                    output, data,
-                    config=config["loss"],
-                    num_sketches=config["num_sketches"],
-                    pcg_steps=config["pcg_steps"],
-                    pcg_weight=config["pcg_weight"],
-                    normalized=config["normalized"],
-                    use_rademacher=config["use_rademacher"],
-                )
-                
-                if reg is not None and config.get("regularizer", 0) > 0:
-                    l = l + config["regularizer"] * reg
+            # 2. Manually cast the model's output to float32 before the loss function.
+            # This ensures that the loss function, which has operations not supported
+            # in float16 for sparse tensors, receives float32 inputs and runs safely.
+            if isinstance(output, tuple):
+                # Handles the case where the model returns (L, U)
+                output = (output[0].to(torch.float32), output[1].to(torch.float32))
+            else:
+                output = output.to(torch.float32)
             
-            # --- MODIFICATION 5: Replace the backward/step/zero_grad block ---
-            # Original block:
-            # l.backward()
-            # if config.get("gradient_clipping"):
-            #     torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clipping"])
-            # optimizer.step()
-            # optimizer.zero_grad()
+            # The regularization term might also be a tensor from the model
+            if isinstance(reg, torch.Tensor):
+                reg = reg.to(torch.float32)
 
-            # New AMP-compatible block:
+            # Prepare the model output tuple (L, L.T) for the loss function if needed
+            if config["model"] == "neuralif":
+                output = (output, output.T)
+
+            # 3. Compute the loss OUTSIDE the autocast context
+            l = loss(
+                output, data,
+                config=config["loss"],
+                num_sketches=config["num_sketches"],
+                pcg_steps=config["pcg_steps"],
+                pcg_weight=config["pcg_weight"],
+                normalized=config["normalized"],
+                use_rademacher=config["use_rademacher"],
+            )
+            
+            if reg is not None and config.get("regularizer", 0) > 0:
+                l = l + config["regularizer"] * reg
+            
+            # --- END OF THE FIX ---
+            
+            # 4. The backward pass still uses the scaler to manage float16 gradients
             scaler.scale(l).backward()
-
-            # Optional: Unscale gradients before clipping
+            
+            # Optional: Unscale gradients before clipping, as is standard practice
             if config.get("gradient_clipping"):
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config["gradient_clipping"])
 
             scaler.step(optimizer)
             scaler.update()
-            optimizer.zero_grad()
-            # --- End of Modification 5 ---
             
             running_loss += l.item()
             
@@ -197,11 +209,10 @@ def argparser():
 
     parser = argparse.ArgumentParser()
     
+    # ... (the argparser function remains exactly the same) ...
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--device", type=int, required=False)
     parser.add_argument("--save", action='store_true')
-    
-    # Training parameters
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_epochs", type=int, default=100)
@@ -218,8 +229,6 @@ def argparser():
     parser.add_argument("--regularizer", type=float, default=0)
     parser.add_argument("--scheduler", action='store_true', default=False)
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Initial learning rate for the AdamW optimizer.")
-    
-    # Model parameters
     parser.add_argument("--model", type=str, default="neuralif")
     parser.add_argument("--latent_size", type=int, default=8)
     parser.add_argument("--message_passing_steps", type=int, default=3)
@@ -229,7 +238,7 @@ def argparser():
     parser.add_argument("--activation", type=str, default="relu")
     parser.add_argument('--no-skip-connections', dest='skip_connections', action='store_false', default=True)
     parser.add_argument("--augment_nodes", action='store_true')
-    parser.add_argument("--global_features", type=int, default=0)
+    parser.add__argument("--global_features", type=int, default=0)
     parser.add_argument("--edge_features", type=int, default=1)
     parser.add_argument("--graph_norm", action='store_true')
     parser.add_argument("--two_hop", action='store_true')
