@@ -1,6 +1,6 @@
 import warnings
 import torch
-
+from torch.utils.checkpoint import checkpoint
 from apps.data import graph_to_matrix
 
 
@@ -215,7 +215,7 @@ def improved_sketch_with_pcg(
     sketch_loss = torch.stack(losses).mean()
 
     # pcg proxy (average over early residuals)
-    proxy = pcg_proxy(L_mat, U_mat, A, pcg_steps)
+    proxy = checkpoint(pcg_proxy, L_mat, U_mat, A, pcg_steps, use_reentrant=False)
 
     return sketch_loss + pcg_weight * proxy
 
