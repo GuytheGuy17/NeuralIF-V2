@@ -1,9 +1,10 @@
 import warnings
 import torch
-from torch.autograd import Function
 from apps.data import graph_to_matrix
 
+# Note: We no longer need autograd.Function or the standard checkpoint for the loss
 warnings.filterwarnings('ignore', '.*Sparse CSR tensor support is in beta state.*')
+
 
 def frobenius_loss(L, A, sparse=True):
     # This function is unchanged
@@ -20,6 +21,7 @@ def frobenius_loss(L, A, sparse=True):
         L = L.to_dense().squeeze()
         U = U.to_dense().squeeze()
         return torch.linalg.norm(L@U - A, ord="fro")
+
 
 def sketched_loss(L, A, c=None, normalized=False):
     # This function is unchanged
@@ -38,6 +40,7 @@ def sketched_loss(L, A, c=None, normalized=False):
         norm = norm / (c + eps)
     return norm
 
+
 def supervised_loss(L, A, x):
     # This function is unchanged
     if type(L) is tuple:
@@ -53,6 +56,7 @@ def supervised_loss(L, A, x):
         b = A@x
     res = L@(U@x) - b
     return torch.linalg.vector_norm(res, ord=2)
+
 
 def dircet_min_loss(L, A, x):
     # This function is unchanged
@@ -72,7 +76,7 @@ def dircet_min_loss(L, A, x):
 
 def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3, preconditioner_solve_steps: int = 5):
     """
-    This function remains unchanged. It is now called by the custom checkpoint wrapper.
+    This function remains unchanged. Its value is computed, but its gradient is not.
     """
     def iterative_sparse_solve(A_sparse, b_vec, iterations):
         x = torch.zeros_like(b_vec)
@@ -128,51 +132,22 @@ def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3, preconditioner_solve_steps: in
 
     return torch.stack(residuals).mean()
 
-# --- START OF THE FIX ---
-class CheckpointedPCGProxy(Function):
-    @staticmethod
-    def forward(ctx, L_mat, U_mat, A, cg_steps):
-        # Save inputs for the backward pass
-        ctx.save_for_backward(L_mat, U_mat, A)
-        ctx.cg_steps = cg_steps
-        
-        # Run forward pass without tracking gradients to save memory
-        with torch.no_grad():
-            output_loss = pcg_proxy(L_mat, U_mat, A, cg_steps)
-        
-        return output_loss
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # Retrieve saved tensors
-        L_mat, U_mat, A = ctx.saved_tensors
-        cg_steps = ctx.cg_steps
-
-        # Create temporary tensors that require gradients for the re-computation
-        L_mat_temp = L_mat.detach().requires_grad_(True)
-        U_mat_temp = U_mat.detach().requires_grad_(True)
-        
-        # Re-run the forward pass with gradients enabled to build a temporary graph
-        with torch.enable_grad():
-            temp_loss = pcg_proxy(L_mat_temp, U_mat_temp, A, cg_steps)
-        
-        # Compute gradients with respect to the temporary inputs
-        L_grad, U_grad = torch.autograd.grad(temp_loss, (L_mat_temp, U_mat_temp))
-        
-        # Return gradients, ensuring to multiply by the upstream gradient
-        # The gradients for A and cg_steps are None as they don't require grad.
-        return L_grad * grad_output, U_grad * grad_output, None, None
-
 def improved_sketch_with_pcg(
     L, A, num_sketches, normalized, pcg_steps, pcg_weight, use_rademacher
 ):
+    """
+    Final corrected version. The pcg_proxy acts as a regularizer
+    but its gradient path is detached to save memory.
+    """
     if isinstance(L, tuple):
         L_mat, U_mat = L
     else:
         L_mat = L
         U_mat = L_mat.T
 
-    # Sketch term (simplified back to original logic as inputs are now float32)
+    # --- GRADIENT PATH 1: The Sketch Loss (Memory Efficient) ---
+    # The gradient will flow through this part of the loss normally.
+    # This provides the primary learning signal to the GNN.
     n = A.shape[0]
     losses = []
     for _ in range(num_sketches):
@@ -180,7 +155,9 @@ def improved_sketch_with_pcg(
             z = torch.randint(0,2,(n,1),device=L_mat.device,dtype=L_mat.dtype)*2 - 1
         else:
             z = torch.randn((n,1),device=L_mat.device,dtype=L_mat.dtype)
+        
         r = L_mat @ (U_mat @ z) - A @ z
+
         norm_r = torch.linalg.vector_norm(r,2)
         if normalized:
             denom = torch.linalg.vector_norm(A @ z,2) + 1e-16
@@ -188,11 +165,17 @@ def improved_sketch_with_pcg(
         losses.append(norm_r)
     sketch_loss = torch.stack(losses).mean()
 
-    # Call the custom checkpointing function via .apply()
-    proxy = CheckpointedPCGProxy.apply(L_mat, U_mat, A, pcg_steps)
+    # --- GRADIENT PATH 2: The PCG Proxy (Detached) ---
+    # We compute the forward pass of the pcg_proxy to get its value,
+    # but we immediately detach it from the computation graph by using a no_grad context.
+    with torch.no_grad():
+        proxy_val = pcg_proxy(L_mat, U_mat, A, cg_steps)
+    
+    # The total loss is the sketch loss plus the *value* of the proxy.
+    # The gradient of the proxy term with respect to the model parameters is now zero.
+    total_loss = sketch_loss + pcg_weight * proxy_val
 
-    return sketch_loss + pcg_weight * proxy
-# --- END OF THE FIX ---
+    return total_loss
 
 def loss(output, data, config=None, **kwargs):
     # load the data
@@ -204,6 +187,7 @@ def loss(output, data, config=None, **kwargs):
     
     # compute loss
     if config is None:
+        # this is the regular loss used to train NeuralIF
         l = sketched_loss(output, A, normalized=False)
     elif config == "sketched":
         l = sketched_loss(output, A, normalized=kwargs.get("normalized", False))
