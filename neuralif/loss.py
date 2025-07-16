@@ -176,6 +176,8 @@ def pcg_proxy(L_mat, U_mat, A, cg_steps: int = 3, preconditioner_solve_steps: in
 
     return torch.stack(residuals).mean()
 
+# In neuralif/loss.py
+
 def improved_sketch_with_pcg(
     L,
     A,
@@ -206,7 +208,20 @@ def improved_sketch_with_pcg(
             z = torch.randint(0,2,(n,1),device=L_mat.device,dtype=L_mat.dtype)*2 - 1
         else:
             z = torch.randn((n,1),device=L_mat.device,dtype=L_mat.dtype)
-        r = L_mat @ (U_mat @ z) - A @ z
+        # --- FIX: Ensure all matrices are in float32 to avoid dtype mismatch ---
+        
+        # Manually cast the sparse matrices and the input matrix A to float32
+        L_mat_f32 = L_mat.to(torch.float32)
+        U_mat_f32 = U_mat.to(torch.float32)
+        A_f32 = A.to(torch.float32)
+        
+        # Also ensure z is float32 to avoid another dtype mismatch
+        z_f32 = z.to(torch.float32)
+
+        # Now perform the operation in full float32 precision
+        r = L_mat_f32 @ (U_mat_f32 @ z_f32) - A_f32 @ z_f32
+        # --- END OF FIX ---
+
         norm_r = torch.linalg.vector_norm(r,2)
         if normalized:
             denom = torch.linalg.vector_norm(A @ z,2) + 1e-16
@@ -215,7 +230,9 @@ def improved_sketch_with_pcg(
     sketch_loss = torch.stack(losses).mean()
 
     # pcg proxy (average over early residuals)
-    proxy = checkpoint(pcg_proxy, L_mat, U_mat, A, pcg_steps, use_reentrant=False)
+    # The pcg_proxy also uses these matrices, so we should ensure it also
+    # gets the float32 versions to be safe.
+    proxy = checkpoint(pcg_proxy, L_mat.to(torch.float32), U_mat.to(torch.float32), A.to(torch.float32), pcg_steps, use_reentrant=False)
 
     return sketch_loss + pcg_weight * proxy
 
