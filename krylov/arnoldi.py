@@ -1,105 +1,42 @@
-import torch
+import numpy as np
 
-
-def arnoldi(M, A, r0, m, tol=1e-12):
+def arnoldi_iteration(A, num_steps: int):
     """
-    This function computes an orthonormal basis
-    
-    V_m = {v_1,...,v_{m+1}} 
-    
-    of K_{m+1}(A, r^{(0)}) = span{r^{(0)}, Ar^{(0)}, ..., A^{m}r^{(0)}}.
-    
-    Input parameters:
-    -----------------
-      A: array_like
-          An (n x n) array.
-      
-      b: array_like
-          Initial vector of length n
-      
-      m: int
-          One less than the dimension of the Krylov subspace. Must be > 0.
-      
-      r0: array_like 
-          Initial residual (length n)
-      
-      tol: 
-          Tolerance for convergence
+    Performs Arnoldi iteration to produce an orthonormal basis V and a
+    Hessenberg matrix H such that A*V_k = V_{k+1}*H_k.
 
-    Output:
-    -------
-      Q: numpy.array 
-          n x (m + 1) array, the columns are an orthonormal basis of the Krylov subspace.
-      
-      H: numpy.array
-          An (m + 1) x m array. It is the matrix A on basis Q. It is upper Hessenberg.
+    Args:
+        A: The matrix (can be a SciPy sparse matrix or any object with a .dot method).
+        num_steps: The number of iterations to run (the size of the Krylov subspace).
+
+    Returns:
+        V: A list of the orthonormal basis vectors.
+        H: The (num_steps x num_steps) upper Hessenberg matrix.
     """
-    
-    # Check inputs
     n = A.shape[0]
-    d = r0.dtype
     
-    # assert A.shape == (n, n) and b.shape == (n,) and r0.shape == (n,), "Matrix and vector dimensions don not match"
-    # assert isinstance(m, int) and m >= 0, "m must be a positive integer"
+    # Start with a random normalized vector
+    b = np.random.rand(n)
+    q = b / np.linalg.norm(b)
     
-    m = min(m, n)
-    
-    # Initialize matrices
-    V = torch.zeros((n, m + 1), dtype=d)
-    H = torch.zeros((m + 1, m), dtype=d)
-    
-    # Normalize input vector and use for Krylov vector
-    beta = torch.linalg.norm(r0)
-    V[:, 0] = r0 / beta
+    V = [q]
+    H = np.zeros((num_steps + 1, num_steps), dtype=float)
 
-    for k in range(1, m + 1):
-        # Generate a new candidate vector
-        w = M(A @ V[:, k - 1]) # Note that here is different from arnoldi_one_iter as we iter over k from 1 to m. 
-                               # In arnoldi_one_iter we have k as inputo to the function and we have V[:, k - 1] as k starts at 0.
+    for k in range(num_steps):
+        w = A.dot(V[k]) # Matrix-vector product
         
-        # Orthogonalization
-        for j in range(k):
-            H[j, k - 1] = V[:, j] @ w
-            w -= H[j, k - 1] * V[:, j]
+        # --- Modified Gram-Schmidt ---
+        for j in range(k + 1):
+            H[j, k] = np.dot(V[j].conj(), w)
+            w = w - H[j, k] * V[j]
         
-        H[k, k - 1] = torch.linalg.norm(w)
-
-        # Check convergence
-        if H[k, k - 1] <= tol:
-            return V, H
+        H[k + 1, k] = np.linalg.norm(w)
         
-        # Normalize and store the new basis vector
-        V[:, k] = w / H[k, k - 1]
-    
-    return V, H
-
-
-def arnoldi_step(M, A, V, k, left=True, tol=1e-12):
-    
-    n = A.shape[0]  # Dimension of the matrix
-    d = A.dtype  # Data type of the matrix
-    
-    # Initialize k + 2 nonzero elements of H along column k
-    h_k = torch.zeros(k + 2, dtype=d)
-
-    # Calculate the new vector in the Krylov subspace
-    if left:
-        v_new = M(A @ V[:, k])
-    else:
-        v_new = A @ M(V[:, k])
-    # Calculate the first k elements of the kth Hessenberg column
-    for j in range(k + 1):
-        h_k[j] = v_new @ V[:, j]
-        v_new -= h_k[j] * V[:, j]
-
-    # Add the k+1 element
-    h_k[k + 1] = torch.linalg.norm(v_new)
-    
-    # Early termination with exact solution
-    if h_k[k + 1] <= tol:
-        return h_k, None
-    
-    # Find the new orthogonal vector in the basis of the Krylov subspace
-    v_new /= h_k[k + 1]
-
-    return h_k, v_new
+        # Check for breakdown
+        if H[k + 1, k] < 1e-10:
+            break
+            
+        V.append(w / H[k + 1, k])
+        
+    # Return the basis vectors and the Hessenberg matrix (without the last row)
+    return V, H[:num_steps, :num_steps]

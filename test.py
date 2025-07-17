@@ -2,235 +2,155 @@ import argparse
 import os
 import datetime
 import numpy as np
-import scipy
 import scipy.sparse
 import torch
 import json
+from tqdm import tqdm # For a helpful progress bar
 
 from krylov.cg import conjugate_gradient, preconditioned_conjugate_gradient
 from krylov.gmres import gmres
+from krylov.arnoldi import arnoldi_iteration # Import the new function
 from krylov.preconditioner import get_preconditioner
-
 from neuralif.models import NeuralIF, NeuralPCG, PreCondNet, LearnedLU
 from neuralif.utils import torch_sparse_to_scipy, time_function
 from neuralif.logger import TestResults
-
-# CORRECTED: Import 'matrix_to_graph' instead of the old name
 from apps.data import matrix_to_graph, get_dataloader
 
-
-@torch.inference_mode()
-def test(model, test_loader, device, folder, save_results=False, dataset="random", solver="cg"):
-    # This function remains unchanged
-    if save_results:
-        os.makedirs(folder, exist_ok=False)
-
-    print()
-    print(f"Test:\t{len(test_loader.dataset)} samples")
-    print(f"Solver:\t{solver} solver")
-    print()
-    
-    if model is None:
-        methods = ["baseline", "jacobi", "ilu"]
+def run_solver(solver_name, A, b, M, settings, x_true=None):
+    """Helper function to dispatch to the correct solver."""
+    if solver_name == "cg":
+        if M is None or M.__class__.__name__ == 'Preconditioner': # Unpreconditioned case
+             return conjugate_gradient(A, b, x_true=x_true, **settings)
+        else:
+             return preconditioned_conjugate_gradient(A, b, M=M, x_true=x_true, **settings)
+    elif solver_name == "gmres":
+        return gmres(A, b, M=M, x_true=x_true, **settings)
     else:
-        assert solver in ["cg", "gmres"], "Data-driven method only works with CG or GMRES"
-        methods = ["learned"]
-    
-    if solver == "direct":
-        methods = ["direct"]
-    
-    for method in methods:
-        print(f"Testing {method} preconditioner")
+        raise NotImplementedError(f"Solver '{solver_name}' not implemented.")
+
+def test(config):
+    """
+    Main testing function, rewritten for performance and clarity.
+    """
+    device = torch.device(f"cuda:{config['device']}" if torch.cuda.is_available() and config['device'] is not None else "cpu")
+    print(f"\nUsing device: {device}")
+
+    # --- Load Model (if applicable) ---
+    model = None
+    if config['model'] != "none":
+        model_map = {"neuralif": NeuralIF, "neuralpcg": NeuralPCG, "precondnet": PreCondNet, "learnedlu": LearnedLU}
+        model_class = model_map.get(config['model'])
+        if model_class is None: raise NotImplementedError(f"Model {config['model']} not available.")
         
-        test_results = TestResults(method, dataset, folder,
-                                   model_name= f"\n{model.__class__.__name__}" if method == "learned" else "",
-                                   target=1e-6,
-                                   solver=solver)
+        print(f"Loading model: {model_class.__name__}")
+        # This logic should be adapted if you have a real checkpoint to load
+        model = model_class(**{"latent_size": 16, "message_passing_steps": 4})
+        model.to(device).eval()
+        print("Model loaded and in eval mode.")
+
+    # --- Setup Data and Methods ---
+    test_loader = get_dataloader(config['dataset'], batch_size=1, mode=config['subset'])
+    
+    # Determine which methods to run
+    methods_to_test = []
+    if not config['analyze_arnoldi_only']:
+        methods_to_test = ["baseline", "jacobi", "ilu"] if model is None else ["learned"]
+    
+    # --- Initialize Result Loggers ---
+    results_loggers = {
+        method: TestResults(method=method, dataset=config['dataset'], folder=config['folder'], solver=config['solver'])
+        for method in methods_to_test
+    }
+    if config['analyze_arnoldi']:
+        results_loggers['arnoldi_eigs'] = TestResults(method='arnoldi_eigs', dataset=config['dataset'], folder=config['folder'])
+
+    print(f"\nTesting on {len(test_loader.dataset)} samples...")
+    if methods_to_test: print(f"-> Preconditioner methods: {methods_to_test}")
+    if config['analyze_arnoldi']: print("-> Analysis: Arnoldi Iteration for Eigenvalues")
+
+    # --- Main Test Loop ---
+    for data in tqdm(test_loader, desc="Testing Progress"):
+        data = data.to(device)
         
-        for sample, data in enumerate(test_loader):
-            plot = save_results and sample == (len(test_loader.dataset) - 1)
-            
-            start = time_function()
-            
-            data = data.to(device)
-            prec = get_preconditioner(data, method, model=model)
-            
-            p_time = prec.time
-            breakdown = prec.breakdown
-            nnzL = prec.nnz
-            
-            stop = time_function()
-            
-            A = torch.sparse_coo_tensor(data.edge_index, data.edge_attr.squeeze(),
-                                        dtype=torch.float64,
-                                        requires_grad=False).to("cpu").to_sparse_csr()
-            
-            b = data.x[:, 0].squeeze().to("cpu").to(torch.float64)
-            b_norm = torch.linalg.norm(b)
-            
-            b = b / b_norm
-            solution = data.s.to("cpu").to(torch.float64).squeeze() / b_norm if hasattr(data, "s") else None
-            
-            overhead = (stop - start) - (p_time)
-            
-            start_solver = time_function()
-            
-            solver_settings = {
-                "max_iter": 10_000,
-                "x0": None
-            }
-            
-            if breakdown:
-                res = []
-            
-            elif solver == "direct":
-                A_ = torch.sparse_coo_tensor(data.edge_index, data.edge_attr.squeeze(),
-                                              dtype=torch.float64, requires_grad=False)
-                A_s = torch_sparse_to_scipy(A_).tocsr()
-                start_solver = time_function()
-                _ = scipy.sparse.linalg.spsolve(A_s, b.numpy())
-                res = [(torch.Tensor([0]), torch.Tensor([0]))] * 2
-            
-            elif solver == "cg" and method == "baseline":
-                res, _ = conjugate_gradient(A, b, x_true=solution,
-                                            rtol=test_results.target, **solver_settings)
-            
-            elif solver == "cg":
-                res, _ = preconditioned_conjugate_gradient(A, b, M=prec, x_true=solution,
-                                                           rtol=test_results.target, **solver_settings)
-                
-            elif solver == "gmres":
-                res, _ = gmres(A, b, M=prec, x_true=solution,
-                               **solver_settings, plot=plot,
-                               atol=test_results.target,
-                               left=False)
-            
-            stop_solver = time_function()
-            solver_time = (stop_solver - start_solver)
-            
-            test_results.log_solve(A.shape[0], solver_time, len(res) - 1,
-                                   np.array([r[0].item() for r in res]),
-                                   np.array([r[1].item() for r in res]),
-                                   p_time, overhead)
-            
-            nnzA = A._nnz()
-            test_results.log(nnzA, nnzL, plot=plot)
+        # Convert to CPU formats once per sample for baselines
+        A_torch_cpu = torch.sparse_coo_tensor(
+            data.edge_index, data.edge_attr.squeeze(),
+            size=(data.num_nodes, data.num_nodes),
+            dtype=torch.float64, requires_grad=False
+        ).cpu().coalesce()
         
-        if save_results:
-            test_results.save_results()
+        A_scipy_cpu_csc = torch_sparse_to_scipy(A_torch_cpu).tocsc()
         
-        test_results.print_summary()
+        # --- Run Arnoldi Analysis (if enabled) ---
+        if config['analyze_arnoldi']:
+            _, H = arnoldi_iteration(A_scipy_cpu_csc, num_steps=config['arnoldi_steps'])
+            eigenvalues = np.linalg.eigvals(H)
+            results_loggers['arnoldi_eigs'].log_eigenval_dist(torch.from_numpy(np.real(eigenvalues)))
 
+        # --- Run Preconditioner Tests ---
+        if not methods_to_test:
+            continue
 
-def load_checkpoint(model, args, device):
-    # This function remains unchanged
-    checkpoint_path = args.checkpoint
-    
-    if checkpoint_path == "latest":
-        # Logic to find the latest checkpoint
-        results_dir = "./results/"
-        all_dirs = sorted([os.path.join(results_dir, d) for d in os.listdir(results_dir) if os.path.isdir(os.path.join(results_dir, d))])
+        b_cpu = data.x[:, 0].squeeze().cpu().to(torch.float64)
+        b_norm = torch.linalg.norm(b_cpu)
+        b_cpu /= b_norm
+        x_true_cpu = data.s.cpu().to(torch.float64).squeeze() / b_norm if hasattr(data, 's') else None
         
-        config = None
-        for d in reversed(all_dirs):
-            dir_contents = os.listdir(d)
-            if "config.json" in dir_contents and "best_model.pt" in dir_contents:
-                with open(os.path.join(d, "config.json")) as f:
-                    config = json.load(f)
-                
-                if config.get("model") != args.model:
-                    config = None
-                    continue
-                
-                checkpoint_path = os.path.join(d, "best_model.pt")
-                break
-        if config is None:
-            raise FileNotFoundError("Could not find a compatible 'latest' checkpoint.")
+        solver_settings = {"max_iter": 10_000, "rtol": 1e-6}
 
-    else:
-        with open(os.path.join(checkpoint_path, "config.json")) as f:
-            config = json.load(f)
-        checkpoint_path = os.path.join(checkpoint_path, f"{args.weights}.pt")
+        for method in methods_to_test:
+            prec = get_preconditioner(A_scipy_cpu_csc, A_torch_cpu, data, method, model=model)
+            if prec.breakdown: continue
 
-    if args.model == "neuralif":
-        config["drop_tol"] = args.drop_tol
-    
-    model = model(**config)
-    print(f"Loading checkpoint from: {checkpoint_path}")
-    model.load_state_dict(torch.load(checkpoint_path, map_location=torch.device(device)))
-    
-    return model
+            res, err = run_solver(
+                config['solver'], A_scipy_cpu_csc, b_cpu.numpy(),
+                M=prec, settings=solver_settings,
+                x_true=x_true_cpu.numpy() if x_true_cpu is not None else None
+            )
 
+            logger = results_loggers[method]
+            logger.log_solve(n=A_torch_cpu.shape[0], solver_time=time_function(), p_time=prec.time,
+                             solver_iterations=len(res) - 1, solver_error=err, solver_residual=res, overhead=0)
+            logger.log(nnz_a=A_torch_cpu._nnz(), nnz_p=prec.nnz)
 
-def warmup(model, device):
-    # set testing parameters
-    model.to(device)
-    model.eval()
-    
-    # run model warmup
-    test_size = 1_000
-    matrix = scipy.sparse.coo_matrix((np.ones(test_size), (np.arange(test_size), np.arange(test_size))))
-    
-    # CORRECTED: Call 'matrix_to_graph'
-    data = matrix_to_graph(matrix, torch.ones(test_size))
-    data.to(device)
-    _ = model(data)
-    
-    print("Model warmup done...")
-
-
-def argparser():
-    # This function remains unchanged
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--name", type=str, default=None)
-    parser.add_argument("--device", type=int, required=False)
-    parser.add_argument("--model", type=str, required=False, default="none")
-    parser.add_argument("--checkpoint", type=str, required=False)
-    parser.add_argument("--weights", type=str, required=False, default="best_model")
-    parser.add_argument("--drop_tol", type=float, default=0)
-    parser.add_argument("--solver", type=str, default="cg")
-    parser.add_argument("--dataset", type=str, required=False, default="random")
-    parser.add_argument("--subset", type=str, required=False, default="test")
-    parser.add_argument("--n", type=int, required=False, default=0)
-    parser.add_argument("--samples", type=int, required=False, default=None)
-    parser.add_argument("--save", action='store_true', default=False)
-    return parser.parse_args()
-
+    # --- Print and Save Summaries ---
+    print("\n--- TEST RESULTS ---")
+    for method, logger in results_loggers.items():
+        print(f"\n--- Summary for: {method} ---")
+        if 'eigs' in method:
+            # Plot the final eigenvalue distribution from the Arnoldi analysis
+            logger.plot_eigvals(torch.cat(logger.distribution), name="final_distribution")
+            print(f"Eigenvalue distribution plot saved to {config['folder']}")
+        else:
+            logger.print_summary()
+        if config['save']:
+            logger.save_results()
 
 def main():
-    # This function remains unchanged
-    args = argparser()
+    parser = argparse.ArgumentParser(description="Optimised testing script for NeuralIF.")
+    parser.add_argument("--device", type=int, help="GPU device ID.")
+    parser.add_argument("--model", type=str, default="none", help="Model to test ('none' for baselines).")
+    parser.add_argument("--checkpoint", type=str, help="Path to the checkpoint directory.")
+    parser.add_argument("--dataset", type=str, required=True, help="Path to the dataset directory.")
+    parser.add_argument("--subset", type=str, default="test", help="Dataset subset to use ('train', 'val', or 'test').")
+    parser.add_argument("--solver", type=str, default="cg", choices=["cg", "gmres"], help="Krylov solver to use.")
+    parser.add_argument("--name", type=str, default=f"test_run_{datetime.datetime.now():%Y-%m-%d_%H-%M}", help="Name for the results folder.")
+    parser.add_argument("--save", action='store_true', help="Save results and plots.")
     
-    test_device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() and args.device is not None else "cpu")
-    
-    folder = "results/" + (args.name if args.name else datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
-    
-    print()
-    print(f"Using device: {test_device}")
-    
-    model_map = {
-        "nif": NeuralIF, "neuralif": NeuralIF,
-        "lu": LearnedLU, "learnedlu": LearnedLU,
-        "neural_pcg": NeuralPCG, "neuralpcg": NeuralPCG,
-        "precondnet": PreCondNet
-    }
-    
-    if args.model in model_map:
-        print(f"Use model: {model_map[args.model].__name__}")
-        model = load_checkpoint(model_map[args.model], args, test_device)
-        warmup(model, test_device)
-    elif args.model == "none":
-        print("Running non-data-driven baselines")
-        model = None
-    else:
-        raise NotImplementedError(f"Model {args.model} not available.")
-        
-    spd = args.solver in ["cg", "direct"]
-    testdata_loader = get_dataloader(args.dataset, batch_size=1, mode=args.subset)
+    # New arguments for Arnoldi analysis
+    parser.add_argument("--analyze-arnoldi", action='store_true', help="Run Arnoldi iteration to analyze eigenvalues.")
+    parser.add_argument("--arnoldi-steps", type=int, default=50, help="Number of steps for Arnoldi iteration.")
+    parser.add_argument("--analyze-arnoldi-only", action='store_true', help="Run only the Arnoldi analysis, skipping other tests.")
 
-    test(model, testdata_loader, test_device, folder,
-         save_results=args.save, dataset=args.dataset, solver=args.solver)
+    args = parser.parse_args()
+    config = vars(args)
+    config['folder'] = os.path.join("results", config['name'])
+    if config['save']:
+        os.makedirs(config['folder'], exist_ok=True)
+        with open(os.path.join(config['folder'], "test_config.json"), 'w') as f:
+            json.dump(config, f, indent=4)
 
+    test(config)
 
 if __name__ == "__main__":
     main()

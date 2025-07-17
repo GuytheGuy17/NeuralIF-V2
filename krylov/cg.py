@@ -1,75 +1,83 @@
 import torch
 
+def conjugate_gradient(A, b, x0=None, max_iter=None, rtol=1e-5, x_true=None):
+    """
+    Solves the symmetric positive-definite system Ax=b using the Conjugate Gradient method.
+    """
+    n = A.shape[0]
+    if max_iter is None:
+        max_iter = n * 10
 
-def stopping_criterion(A, rk, b):
-    return torch.inner(rk, rk) / torch.inner(b, b)
-
-
-def conjugate_gradient(A, b, x0=None, x_true=None, rtol=1e-8, max_iter=100_000):
-    x_hat = x0 if x0 is not None else torch.zeros_like(b)
-    r = b - A@x_hat # residual
-    p = r.clone() # search direction
+    x = torch.zeros_like(b) if x0 is None else x0.clone()
+    r = b - A @ x
+    p = r.clone()
+    rs_old = torch.dot(r, r)
     
-    # Errors is a tuple of (error, residual)
-    error_i = (x_hat - x_true) if x_true is not None else torch.zeros_like(b, requires_grad=False)
-    res = stopping_criterion(A, r, b)
-    errors = [(torch.inner(error_i, A@error_i), res)]
+    b_norm = torch.linalg.norm(b)
     
-    for _ in range(max_iter):
-        if res < rtol:
+    residuals, errors = [], []
+    if x_true is not None: errors.append(torch.linalg.norm(x - x_true))
+    residuals.append(torch.linalg.norm(r) / b_norm)
+
+    for i in range(max_iter):
+        Ap = A @ p
+        alpha = rs_old / torch.dot(p, Ap)
+        x += alpha * p
+        r -= alpha * Ap
+        
+        rs_new = torch.dot(r, r)
+        
+        if x_true is not None: errors.append(torch.linalg.norm(x - x_true))
+        residuals.append(torch.sqrt(rs_new) / b_norm)
+        
+        if torch.sqrt(rs_new) < rtol * b_norm:
+            break
+            
+        p = r + (rs_new / rs_old) * p
+        rs_old = rs_new
+        
+    return (residuals, errors) if x_true is not None else (residuals, x)
+
+def preconditioned_conjugate_gradient(A, b, M, x0=None, max_iter=None, rtol=1e-5, x_true=None):
+    """
+    Solves the symmetric positive-definite system Ax=b using the Preconditioned Conjugate Gradient method.
+    """
+    n = A.shape[0]
+    if max_iter is None:
+        max_iter = n * 10
+
+    x = torch.zeros_like(b) if x0 is None else x0.clone()
+    r = b - A @ x
+    
+    # M.solve(r) computes M_inv @ r
+    z = M.solve(r)
+    p = z.clone()
+    
+    rz_old = torch.dot(r, z)
+    b_norm = torch.linalg.norm(b)
+
+    residuals, errors = [], []
+    if x_true is not None: errors.append(torch.linalg.norm(x - x_true))
+    residuals.append(torch.linalg.norm(r) / b_norm)
+
+    for i in range(max_iter):
+        Ap = A @ p
+        alpha = rz_old / torch.dot(p, Ap)
+        x += alpha * p
+        r -= alpha * Ap
+        
+        if torch.linalg.norm(r) < rtol * b_norm:
+            if x_true is not None: errors.append(torch.linalg.norm(x - x_true))
+            residuals.append(torch.linalg.norm(r) / b_norm)
             break
         
-        Ap = A@p
-        r_norm = torch.inner(r, r)
+        z = M.solve(r)
+        rz_new = torch.dot(r, z)
         
-        a = r_norm / torch.inner(Ap, p) # step length
-        x_hat = x_hat + a * p
-        r = r - a * Ap
-        p = r + (torch.inner(r, r) / r_norm) * p
-        
-        error_i = (x_hat - x_true) if x_true is not None else torch.zeros_like(b, requires_grad=False)
-        res = stopping_criterion(A, r, b)
-        errors.append((torch.inner(error_i, A@error_i), res))
-        
-    return errors, x_hat
+        p = z + (rz_new / rz_old) * p
+        rz_old = rz_new
 
+        if x_true is not None: errors.append(torch.linalg.norm(x - x_true))
+        residuals.append(torch.linalg.norm(r) / b_norm)
 
-def preconditioned_conjugate_gradient(A, b, M=None, x0=None, x_true=None, rtol=1e-8, max_iter=100_000):
-    # prec should be a function solving the linear equation system Mz=r one way or another
-    # M is the preconditioner approximation of A^-1 or split approximation of MM^T=A
-    # Saad, 2003 Algorithm 9.1
-    
-    if M is None:
-        M = lambda x: x
-    
-    x_hat = x0 if x0 is not None else torch.zeros_like(b)
-    
-    rk = b - A@x_hat
-    zk = M(rk)
-    pk = zk.clone()
-    
-    # Errors is a tuple of (error, residual)
-    error_i = (x_hat - x_true) if x_true is not None else torch.zeros_like(b, requires_grad=False)
-    res = stopping_criterion(A, zk, b)
-    errors = [(torch.inner(error_i, A@error_i), res)]
-    
-    for _ in range(max_iter):
-        if res < rtol:
-            break
-        
-        # precomputations
-        Ap = A@pk
-        rz = torch.inner(rk, zk)
-        
-        a = rz / torch.inner(Ap, pk) # step length
-        x_hat = x_hat + a * pk
-        rk = rk - a * Ap
-        zk = M(rk)
-        beta = torch.inner(rk, zk) / rz
-        pk = zk + beta * pk
-        
-        error_i = (x_hat - x_true) if x_true is not None else torch.zeros_like(b, requires_grad=False)
-        res = stopping_criterion(A, rk, b)
-        errors.append((torch.inner(error_i, A@error_i), res))
-        
-    return errors, x_hat
+    return (residuals, errors) if x_true is not None else (residuals, x)
