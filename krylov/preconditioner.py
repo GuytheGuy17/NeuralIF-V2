@@ -61,11 +61,14 @@ class Learned(Preconditioner):
         """Runs the model and converts the output factors to a SciPy format."""
         start_time = time_function()
         with torch.no_grad():
-            L_torch, U_torch, _ = self._model(self._data)
+            # We only need the first output (L) from the model.
+            L_torch, _, _ = self._model(self._data)
         
-        # Convert torch sparse tensors to scipy sparse matrices for solving
+        # --- THIS IS THE FIX ---
+        # Convert L to SciPy format, then create U by transposing L in SciPy.
+        # This avoids the sparse-vs-strided tensor issue from L.T in PyTorch.
         self.L_scipy = torch_sparse_to_scipy(L_torch.cpu()).tocsc()
-        self.U_scipy = torch_sparse_to_scipy(U_torch.cpu()).tocsc()
+        self.U_scipy = self.L_scipy.T.tocsc()
 
         self.time = time_function() - start_time
         self._computed = True
@@ -79,8 +82,6 @@ class Learned(Preconditioner):
         """Applies the learned preconditioner M_inv = U_inv * L_inv."""
         if not self._computed: self._compute_preconditioner()
         
-        # --- THIS IS THE FIX ---
-        # Use SciPy's robust sparse triangular solve instead of torch.triangular_solve
         b_np = b.cpu().numpy()
         y = scipy.sparse.linalg.spsolve_triangular(self.L_scipy, b_np, lower=True)
         x_np = scipy.sparse.linalg.spsolve_triangular(self.U_scipy, y, lower=False)
