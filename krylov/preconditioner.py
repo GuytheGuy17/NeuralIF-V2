@@ -36,18 +36,14 @@ class ScipyILU(Preconditioner):
     """Wrapper for the SciPy ILU preconditioner."""
     def __init__(self, ilu_obj):
         super().__init__()
-        # Store the object returned by spilu directly
         self._prec = ilu_obj
 
     @property
     def nnz(self):
-        # Access the L and U factors from the stored spilu object
         return self._prec.L.nnz + self._prec.U.nnz
 
     def solve(self, b: torch.Tensor) -> torch.Tensor:
-        # CONVERT TO NUMPY for SciPy, then back to torch
         b_np = b.cpu().numpy()
-        # The spilu object has the .solve() method we need
         x_np = self._prec.solve(b_np)
         return torch.from_numpy(x_np).to(b.device)
 
@@ -58,33 +54,50 @@ class Learned(Preconditioner):
         self._model = model
         self._data = data
         self._computed = False
-        self.L_torch = None
-        self.U_torch = None
+        self.L_scipy = None
+        self.U_scipy = None
 
     def _compute_preconditioner(self):
+        """Runs the model and converts the output factors to a SciPy format."""
         start_time = time_function()
         with torch.no_grad():
-            self.L_torch, self.U_torch, _ = self._model(self._data)
+            L_torch, U_torch, _ = self._model(self._data)
+        
+        # Convert torch sparse tensors to scipy sparse matrices for solving
+        self.L_scipy = torch_sparse_to_scipy(L_torch.cpu()).tocsc()
+        self.U_scipy = torch_sparse_to_scipy(U_torch.cpu()).tocsc()
+
         self.time = time_function() - start_time
         self._computed = True
     
     @property
     def nnz(self):
         if not self._computed: self._compute_preconditioner()
-        return self.L_torch.coalesce()._nnz() + self.U_torch.coalesce()._nnz()
+        return self.L_scipy.nnz + self.U_scipy.nnz
 
     def solve(self, b: torch.Tensor) -> torch.Tensor:
+        """Applies the learned preconditioner M_inv = U_inv * L_inv."""
         if not self._computed: self._compute_preconditioner()
-        y, _ = torch.triangular_solve(b.unsqueeze(1), self.L_torch, upper=False)
-        x, _ = torch.triangular_solve(y, self.U_torch, upper=True)
-        return x.squeeze(1)
+        
+        # --- THIS IS THE FIX ---
+        # Use SciPy's robust sparse triangular solve instead of torch.triangular_solve
+        b_np = b.cpu().numpy()
+        y = scipy.sparse.linalg.spsolve_triangular(self.L_scipy, b_np, lower=True)
+        x_np = scipy.sparse.linalg.spsolve_triangular(self.U_scipy, y, lower=False)
+        return torch.from_numpy(x_np).to(b.device)
 
 def get_preconditioner(data, method: str, model=None) -> Preconditioner:
     """Factory function to create the specified preconditioner."""
+    if method == "learned":
+        if model is None: raise ValueError("A model must be provided for the 'learned' method.")
+        return Learned(model, data)
+
+    # For baselines, create the PyTorch tensor on the specified device
+    device = data.x.device
     A_torch = torch.sparse_coo_tensor(
         data.edge_index, data.edge_attr.squeeze(),
         size=(data.num_nodes, data.num_nodes),
-        device=data.x.device,
+        device=device,
         dtype=torch.float64
     ).coalesce()
     
@@ -96,9 +109,6 @@ def get_preconditioner(data, method: str, model=None) -> Preconditioner:
         A_scipy_csc = torch_sparse_to_scipy(A_torch.cpu()).tocsc()
         start_time = time_function()
         try:
-            # --- THIS IS THE FIX ---
-            # spilu returns an object that has a .solve method. We use it directly.
-            # The unnecessary LinearOperator wrapper is removed.
             ilu_op = scipy.sparse.linalg.spilu(A_scipy_csc, drop_tol=1e-4, fill_factor=10)
             prec = ScipyILU(ilu_op)
         except Exception as e:
@@ -107,8 +117,5 @@ def get_preconditioner(data, method: str, model=None) -> Preconditioner:
             prec.breakdown = True
         prec.time = time_function() - start_time
         return prec
-    elif method == "learned":
-        if model is None: raise ValueError("A model must be provided for the 'learned' method.")
-        return Learned(model, data)
     else:
         raise NotImplementedError(f"Preconditioner method '{method}' is not implemented.")
