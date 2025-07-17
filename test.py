@@ -1,5 +1,3 @@
-# FILE: test.py
-
 import argparse
 import os
 import datetime
@@ -19,16 +17,12 @@ from apps.data import matrix_to_graph, get_dataloader
 
 def run_solver(solver_name, A, b, M, settings, x_true=None):
     """Helper function to dispatch to the correct solver. Operates on torch tensors."""
+    # The CG solver is pure-torch and GPU-compatible
     if solver_name == "cg":
-        if M.__class__.__name__ == 'Preconditioner': # Unpreconditioned case
+        if M.__class__.__name__ == 'Preconditioner':
              return conjugate_gradient(A, b, x_true=x_true, **settings)
         else:
              return preconditioned_conjugate_gradient(A, b, M=M, x_true=x_true, **settings)
-    elif solver_name == "gmres":
-        # Note: GMRES implementation provided earlier expects numpy. 
-        # For simplicity, we convert here. A pure-torch GMRES would be more efficient.
-        res, err = gmres(A.to_scipy(), b.cpu().numpy(), M=M, x_true=x_true.cpu().numpy() if x_true is not None else None, **settings)
-        return torch.tensor(res), torch.tensor(err)
     else:
         raise NotImplementedError(f"Solver '{solver_name}' not implemented.")
 
@@ -63,13 +57,12 @@ def test(config):
     if config['analyze_arnoldi']: print("-> Analysis: Arnoldi Iteration for Eigenvalues")
 
     for data in tqdm(test_loader, desc="Testing Progress"):
-        # Keep data on the correct device for as long as possible
         data = data.to(device)
         
         A_torch = torch.sparse_coo_tensor(
             data.edge_index, data.edge_attr.squeeze(),
             size=(data.num_nodes, data.num_nodes),
-            dtype=torch.float64
+            dtype=torch.float64, device=device
         ).coalesce()
         
         b = data.x[:, 0].squeeze().to(torch.float64)
@@ -86,17 +79,28 @@ def test(config):
         if not methods_to_test: continue
 
         for method in methods_to_test:
-            # Preconditioners now handle device logic internally
             prec = get_preconditioner(data, method, model=model)
             if prec.breakdown: continue
 
             solver_settings = {"max_iter": 10_000, "rtol": 1e-6}
-            # All solvers now receive torch tensors
+            
+            # --- TIMING FIX ---
+            # Correctly time the solver duration
+            solver_start_time = time_function()
             res, err = run_solver(config['solver'], A_torch, b, M=prec, settings=solver_settings, x_true=x_true)
+            solver_time = time_function() - solver_start_time
+            # --- END TIMING FIX ---
             
             logger = results_loggers[method]
-            logger.log_solve(n=A_torch.shape[0], solver_time=0, p_time=prec.time,
-                             solver_iterations=len(res) - 1, solver_error=[e.item() for e in err], solver_residual=[r.item() for r in res], overhead=0)
+            logger.log_solve(
+                n=A_torch.shape[0],
+                solver_time=solver_time,  # Pass the calculated duration
+                p_time=prec.time,
+                solver_iterations=len(res) - 1,
+                solver_error=[e.item() for e in err],
+                solver_residual=[r.item() for r in res],
+                overhead=0
+            )
             logger.log(nnz_a=A_torch._nnz(), nnz_p=prec.nnz)
 
     print("\n--- TEST RESULTS ---")
@@ -117,7 +121,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, help="Path to the checkpoint directory.")
     parser.add_argument("--dataset", type=str, required=True, help="Path to the dataset directory.")
     parser.add_argument("--subset", type=str, default="test", help="Dataset subset to use ('train', 'val', or 'test').")
-    parser.add_argument("--solver", type=str, default="cg", choices=["cg", "gmres"], help="Krylov solver to use.")
+    parser.add_argument("--solver", type=str, default="cg", choices=["cg"], help="Krylov solver to use (CG only for now).")
     parser.add_argument("--name", type=str, default=f"test_run_{datetime.datetime.now():%Y-%m-%d_%H-%M}", help="Name for the results folder.")
     parser.add_argument("--save", action='store_true', help="Save results and plots.")
     parser.add_argument("--analyze-arnoldi", action='store_true', help="Run Arnoldi iteration to analyze eigenvalues.")
