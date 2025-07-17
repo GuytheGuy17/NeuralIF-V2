@@ -34,18 +34,20 @@ class Jacobi(Preconditioner):
 
 class ScipyILU(Preconditioner):
     """Wrapper for the SciPy ILU preconditioner."""
-    def __init__(self, ilu_op):
+    def __init__(self, ilu_obj):
         super().__init__()
-        self._prec = ilu_op
+        # Store the object returned by spilu directly
+        self._prec = ilu_obj
 
     @property
     def nnz(self):
-        # M = L*U, nnz is sum of non-zeros in factors
+        # Access the L and U factors from the stored spilu object
         return self._prec.L.nnz + self._prec.U.nnz
 
     def solve(self, b: torch.Tensor) -> torch.Tensor:
         # CONVERT TO NUMPY for SciPy, then back to torch
         b_np = b.cpu().numpy()
+        # The spilu object has the .solve() method we need
         x_np = self._prec.solve(b_np)
         return torch.from_numpy(x_np).to(b.device)
 
@@ -73,8 +75,8 @@ class Learned(Preconditioner):
 
     def solve(self, b: torch.Tensor) -> torch.Tensor:
         if not self._computed: self._compute_preconditioner()
-        y = torch.triangular_solve(b.unsqueeze(1), self.L_torch, upper=False).values
-        x = torch.triangular_solve(y, self.U_torch, upper=True).values
+        y, _ = torch.triangular_solve(b.unsqueeze(1), self.L_torch, upper=False)
+        x, _ = torch.triangular_solve(y, self.U_torch, upper=True)
         return x.squeeze(1)
 
 def get_preconditioner(data, method: str, model=None) -> Preconditioner:
@@ -91,17 +93,14 @@ def get_preconditioner(data, method: str, model=None) -> Preconditioner:
     elif method == "jacobi":
         return Jacobi(A_torch)
     elif method == "ilu":
-        # Using SciPy's ILU which is stable in Colab
         A_scipy_csc = torch_sparse_to_scipy(A_torch.cpu()).tocsc()
         start_time = time_function()
         try:
-            # Create a linear operator that represents the action of M_inv
+            # --- THIS IS THE FIX ---
+            # spilu returns an object that has a .solve method. We use it directly.
+            # The unnecessary LinearOperator wrapper is removed.
             ilu_op = scipy.sparse.linalg.spilu(A_scipy_csc, drop_tol=1e-4, fill_factor=10)
-            M = scipy.sparse.linalg.LinearOperator(A_scipy_csc.shape, ilu_op.solve)
-            prec = ScipyILU(M)
-            # Store factors on the object for nnz calculation
-            prec._prec.L = ilu_op.L 
-            prec._prec.U = ilu_op.U
+            prec = ScipyILU(ilu_op)
         except Exception as e:
             print(f"\nWARNING: SciPy ILU factorization failed for a sample: {e}")
             prec = Preconditioner()
