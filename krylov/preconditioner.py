@@ -1,3 +1,5 @@
+# FILE: krylov/preconditioner.py
+
 import torch
 import ilupp
 import numpy as np
@@ -19,21 +21,22 @@ class Preconditioner:
         return b # Default is identity (no preconditioning)
 
 class Jacobi(Preconditioner):
-    """Jacobi (Diagonal) Preconditioner. Now handles torch tensors."""
+    """Jacobi (Diagonal) Preconditioner."""
     def __init__(self, A_torch: torch.Tensor):
         super().__init__()
-        self.inv_diag = 1.0 / A_torch.diagonal()
+        # --- THIS IS THE FIX ---
+        # Convert to dense before getting the diagonal, which is a supported operation.
+        self.inv_diag = 1.0 / A_torch.to_dense().diagonal()
 
     @property
     def nnz(self):
         return len(self.inv_diag)
     
     def solve(self, b: torch.Tensor) -> torch.Tensor:
-        # M_inv * b = D_inv * b
         return self.inv_diag * b
 
 class Ilupp(Preconditioner):
-    """Wrapper for the ilupp preconditioner. Now handles torch tensors."""
+    """Wrapper for the ilupp preconditioner."""
     def __init__(self, ilu_prec_obj):
         super().__init__()
         self._prec = ilu_prec_obj
@@ -43,13 +46,12 @@ class Ilupp(Preconditioner):
         return self._prec.L.nnz + self._prec.U.nnz
 
     def solve(self, b: torch.Tensor) -> torch.Tensor:
-        # CONVERT TO NUMPY for ilupp, then back to torch
         b_np = b.cpu().numpy()
         x_np = self._prec.solve(b_np)
         return torch.from_numpy(x_np).to(b.device)
 
 class Learned(Preconditioner):
-    """Wrapper for the learned GNN preconditioner. Now handles torch tensors."""
+    """Wrapper for the learned GNN preconditioner."""
     def __init__(self, model, data):
         super().__init__()
         self._model = model
@@ -73,7 +75,6 @@ class Learned(Preconditioner):
     def solve(self, b: torch.Tensor) -> torch.Tensor:
         if not self._computed: self._compute_preconditioner()
         
-        # Use torch's native triangular solve for GPU acceleration
         y = torch.triangular_solve(b.unsqueeze(1), self.L_torch, upper=False).values
         x = torch.triangular_solve(y, self.U_torch, upper=True).values
         return x.squeeze(1)
@@ -82,7 +83,9 @@ def get_preconditioner(data, method: str, model=None, ilupp_kwargs=None) -> Prec
     """Factory function to create the specified preconditioner."""
     A_torch = torch.sparse_coo_tensor(
         data.edge_index, data.edge_attr.squeeze(),
-        size=(data.num_nodes, data.num_nodes)
+        size=(data.num_nodes, data.num_nodes),
+        device=data.x.device, # Ensure tensor is on the correct device
+        dtype=torch.float64
     ).coalesce()
     
     if method == "baseline":
